@@ -1,18 +1,25 @@
 @import "tailwindcss";
 
-@layer base {
-  :root {
-    --color-bg: #0f172a;
-    --color-surface: #1e293b;
-    --color-border: #334155;
-  }
-}
-
 body {
   margin: 0;
-  background-color: #0b0f19;
-  color: #f1f5f9;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: #090a0f;
+  color: #e4e4e7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   user-select: none;
   overflow-x: hidden;
+}
+
+/* Custom styling for native HTML selects inside dark terminal theme */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: #0d0f17 !important;
+  color: #f4f4f5 !important;
+}
+
+select option {
+  background-color: #0d0f17 !important;
+  color: #f4f4f5 !important;
+  padding: 8px 12px;
 }

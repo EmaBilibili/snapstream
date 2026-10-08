@@ -10,15 +10,15 @@
     Video,
     Image as ImageIcon,
     Folder,
-    Sparkles,
-    CheckCircle2,
-    AlertCircle,
+    Terminal,
+    Check,
+    AlertTriangle,
     Loader2,
     RefreshCw,
     Clipboard,
     HardDrive,
-    SlidersHorizontal,
-    Radio
+    ChevronDown,
+    Activity
   } from "lucide-svelte";
 
   interface MediaMetadata {
@@ -96,7 +96,7 @@
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Seleccionar carpeta destino"
+        title: "Seleccionar directorio de destino"
       });
       if (selected && typeof selected === "string") {
         downloadFolder = selected;
@@ -109,7 +109,7 @@
   async function handleDownload() {
     if (!urlInput.trim()) return;
     const id = Date.now().toString();
-    const title = currentPreview?.title || "Recurso Multimedia";
+    const title = currentPreview?.title || "recurso_multimedia";
     const thumbnail = currentPreview?.thumbnail || null;
 
     const newItem: DownloadItem = {
@@ -120,8 +120,8 @@
       mode: selectedMode,
       quality: selectedQuality,
       percent: 0,
-      speed: "Preparando enlace...",
-      eta: "",
+      speed: "0.0 KB/s",
+      eta: "--:--",
       status: "queued"
     };
 
@@ -149,19 +149,19 @@
     if (isCheckingUpdate) return;
     try {
       isCheckingUpdate = true;
-      updateStatus = "Verificando...";
+      updateStatus = "comprobando...";
       const update = await check();
       if (update?.available) {
-        updateStatus = `Nueva v${update.version}`;
+        updateStatus = `disponible: v${update.version}`;
         await update.downloadAndInstall();
-        updateStatus = "Instalado. Reinicia la app.";
+        updateStatus = "instalado: reinicia";
       } else {
-        updateStatus = "Actualizado";
-        setTimeout(() => (updateStatus = null), 3500);
+        updateStatus = "actualizado";
+        setTimeout(() => (updateStatus = null), 3000);
       }
     } catch (e: any) {
-      updateStatus = "Error de red";
-      setTimeout(() => (updateStatus = null), 3500);
+      updateStatus = "error_red";
+      setTimeout(() => (updateStatus = null), 3000);
     } finally {
       isCheckingUpdate = false;
     }
@@ -188,247 +188,244 @@
   });
 </script>
 
-<!-- Contenedor Maestro: Estilo "Mechanical Studio" con texturas técnicas y acentos cyber-amber -->
-<div class="flex-1 flex flex-col w-full h-full min-h-screen bg-[#07090e] text-[#d6deeb] font-mono selection:bg-[#f59e0b] selection:text-black">
+<!-- Terminal Shell Container: Puro Blanco, Negro y Escala de Grises Monocromática -->
+<div class="flex-1 flex flex-col w-full h-full min-h-screen bg-[#090a0f] text-[#d4d4d8] font-mono selection:bg-[#e4e4e7] selection:text-black">
   
-  <!-- Subtle Grid Accent overlay -->
-  <div class="fixed inset-0 pointer-events-none opacity-[0.03] bg-[radial-gradient(#f59e0b_1px,transparent_1px)] [background-size:16px_16px]"></div>
-
-  <!-- Main Frame Container -->
-  <div class="relative z-10 flex-1 flex flex-col max-w-4xl w-full mx-auto p-5 sm:p-7 space-y-5">
+  <div class="flex-1 flex flex-col max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-4">
     
-    <!-- Top Hardware Bar -->
-    <header class="flex items-center justify-between pb-4 border-b border-[#1b2234]">
-      <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded bg-[#f59e0b] flex items-center justify-center text-black shadow-md shadow-[#f59e0b]/20 font-black text-sm">
-          SS
+    <!-- Header: Terminal Window Bar -->
+    <header class="flex items-center justify-between pb-3 border-b border-[#27272a]">
+      <div class="flex items-center gap-2.5">
+        <div class="w-7 h-7 rounded border border-[#3f3f46] bg-[#18181b] flex items-center justify-center text-white">
+          <Terminal class="w-3.5 h-3.5 stroke-[2.2]" />
         </div>
-        <div>
-          <div class="flex items-center gap-2">
-            <span class="text-sm font-bold tracking-wider text-white uppercase font-sans">SnapStream</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-[#161c2b] border border-[#232c42] text-[#f59e0b] font-mono font-semibold">v0.1.0</span>
-          </div>
-          <span class="text-[11px] text-[#5e6c87] tracking-tight">MULTI-PLATFORM ENGINE // YT - IG - FB - TT</span>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold tracking-wider text-white">snapstream</span>
+          <span class="text-[10px] text-[#71717a] font-normal">// v0.1.0</span>
         </div>
       </div>
 
       <div class="flex items-center gap-2">
         {#if updateStatus}
-          <div class="flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded bg-[#131926] border border-[#f59e0b]/40 text-[#f59e0b]">
-            <Radio class="w-3 h-3 animate-ping" />
-            <span>{updateStatus}</span>
+          <div class="flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded bg-[#18181b] border border-[#3f3f46] text-[#e4e4e7]">
+            <Activity class="w-3 h-3 animate-pulse" />
+            <span>[{updateStatus}]</span>
           </div>
         {/if}
         <button
           onclick={checkForUpdates}
           disabled={isCheckingUpdate}
-          class="flex items-center gap-1.5 text-[11px] bg-[#101522] hover:bg-[#161d2f] border border-[#1e263a] hover:border-[#f59e0b]/50 text-[#8b9bb4] hover:text-[#f59e0b] px-2.5 py-1.5 rounded transition-colors cursor-pointer"
+          class="flex items-center gap-1.5 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#a1a1aa] hover:text-white px-2.5 py-1 rounded transition-colors cursor-pointer"
           title="Verificar actualizaciones"
         >
           <RefreshCw class={`w-3 h-3 ${isCheckingUpdate ? 'animate-spin' : ''}`} />
-          <span>Sync</span>
+          <span>sync</span>
         </button>
       </div>
     </header>
 
-    <!-- Console Deck: Input Area -->
-    <div class="bg-[#0b0e17] border border-[#1b2234] rounded-lg p-4 shadow-2xl relative overflow-hidden space-y-4">
+    <!-- Console Input Panel -->
+    <div class="bg-[#10121a] border border-[#27272a] rounded p-4 space-y-3.5">
       
-      <!-- Top Bar of Console -->
-      <div class="flex items-center justify-between text-[11px] text-[#5e6c87] border-b border-[#141a29] pb-2.5">
-        <span class="flex items-center gap-1.5 uppercase tracking-wider font-semibold">
-          <SlidersHorizontal class="w-3.5 h-3.5 text-[#f59e0b]" />
-          Captura de Fuente
-        </span>
+      <!-- Prompt Title & Paste -->
+      <div class="flex items-center justify-between text-[11px] text-[#71717a]">
+        <div class="flex items-center gap-1.5">
+          <span class="text-white font-bold">$</span>
+          <span>input_url --extract</span>
+        </div>
         <button
           onclick={pasteClipboard}
-          class="flex items-center gap-1 text-[11px] text-[#8b9bb4] hover:text-[#f59e0b] transition-colors cursor-pointer"
+          class="flex items-center gap-1 text-[11px] text-[#a1a1aa] hover:text-white border-b border-transparent hover:border-[#a1a1aa] pb-0.5 transition-all cursor-pointer"
         >
           <Clipboard class="w-3 h-3" />
-          <span>Pegar Portapapeles</span>
+          <span>pegar_clipboard</span>
         </button>
       </div>
 
-      <!-- URL Input Line -->
+      <!-- Input Field -->
       <div class="flex flex-col sm:flex-row gap-2">
         <div class="relative flex-1">
           <input
             type="text"
-            placeholder="Pegar enlace de video, reel, post o imagen..."
+            placeholder="https://..."
             bind:value={urlInput}
             onkeydown={(e) => e.key === "Enter" && handleInspectUrl()}
-            class="w-full bg-[#07090e] border border-[#1e263a] focus:border-[#f59e0b] rounded px-3.5 py-2.5 text-xs text-white placeholder-[#414d66] font-mono focus:outline-none transition-colors"
+            class="w-full bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] focus:ring-1 focus:ring-[#71717a] rounded px-3.5 py-2.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none transition-colors"
           />
         </div>
         <button
           onclick={handleInspectUrl}
           disabled={isLoadingInfo || !urlInput.trim()}
-          class="px-4 py-2.5 rounded bg-[#161d2f] hover:bg-[#1e273f] active:bg-[#f59e0b] active:text-black border border-[#2a354f] hover:border-[#f59e0b]/60 disabled:opacity-30 text-white font-mono text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer shrink-0"
+          class="px-4 py-2.5 rounded bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] hover:border-white text-white font-mono text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-30 shrink-0"
         >
           {#if isLoadingInfo}
-            <Loader2 class="w-3.5 h-3.5 animate-spin text-[#f59e0b]" />
-            <span>Leyendo...</span>
+            <Loader2 class="w-3.5 h-3.5 animate-spin" />
+            <span>analizando</span>
           {:else}
-            <span>Inspeccionar</span>
+            <span>inspeccionar</span>
           {/if}
         </button>
       </div>
 
       {#if errorMessage}
-        <div class="p-2.5 bg-[#250d11] border border-[#6b1e28] rounded text-[#f87171] text-xs flex items-center gap-2">
-          <AlertCircle class="w-3.5 h-3.5 shrink-0" />
+        <div class="p-2.5 bg-[#1c1917] border border-[#44403c] rounded text-[#fca5a5] text-xs flex items-center gap-2">
+          <AlertTriangle class="w-3.5 h-3.5 shrink-0" />
           <span>{errorMessage}</span>
         </div>
       {/if}
 
-      <!-- Media Inspector Details Card -->
+      <!-- Media Preview -->
       {#if currentPreview}
-        <div class="p-3 bg-[#07090e] border border-[#1b2234] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+        <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center">
           {#if currentPreview.thumbnail}
             <img
               src={currentPreview.thumbnail}
               alt="Thumbnail"
-              class="w-full sm:w-28 h-20 object-cover rounded bg-[#030407] border border-[#1b2234]"
+              class="w-full sm:w-28 h-20 object-cover rounded bg-black border border-[#27272a] grayscale hover:grayscale-0 transition-all duration-300"
             />
           {/if}
           <div class="flex-1 min-w-0 space-y-1">
-            <h2 class="text-xs font-semibold text-white truncate font-sans" title={currentPreview.title}>
+            <h2 class="text-xs font-bold text-white truncate" title={currentPreview.title}>
               {currentPreview.title}
             </h2>
-            <div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#5e6c87]">
+            <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[#71717a]">
               {#if currentPreview.uploader}
-                <span>Canal: <strong class="text-[#8b9bb4]">{currentPreview.uploader}</strong></span>
+                <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
               {/if}
               {#if currentPreview.duration}
-                <span>Duración: <strong class="text-[#8b9bb4]">{formatDuration(currentPreview.duration)}</strong></span>
+                <span>duración: <strong class="text-[#d4d4d8] font-normal">{formatDuration(currentPreview.duration)}</strong></span>
               {/if}
               {#if currentPreview.is_direct_image}
-                <span class="text-[#f59e0b]">Modo: Imagen directa detectada</span>
+                <span class="text-white font-semibold">[imagen detectada]</span>
               {/if}
             </div>
           </div>
         </div>
       {/if}
 
-      <!-- Operational Controls Grid: Mode, Format, Path -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
-        <!-- Selector de Modo -->
-        <div class="flex bg-[#07090e] p-0.5 rounded border border-[#1e263a]">
+      <!-- Command Controls: Mode / Quality / Path -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+        
+        <!-- Mode Switcher -->
+        <div class="flex bg-[#090a0f] p-0.5 rounded border border-[#27272a]">
           <button
             onclick={() => { selectedMode = "video"; selectedQuality = "best"; }}
             class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "video" ? "bg-[#f59e0b] text-black font-bold" : "text-[#5e6c87] hover:text-[#d6deeb]"
+              selectedMode === "video" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
             }`}
           >
             <Video class="w-3 h-3" />
-            <span>Video</span>
+            <span>video</span>
           </button>
           <button
             onclick={() => { selectedMode = "audio"; selectedQuality = "mp3"; }}
             class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "audio" ? "bg-[#f59e0b] text-black font-bold" : "text-[#5e6c87] hover:text-[#d6deeb]"
+              selectedMode === "audio" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
             }`}
           >
             <Music class="w-3 h-3" />
-            <span>Audio</span>
+            <span>audio</span>
           </button>
           <button
             onclick={() => { selectedMode = "image"; selectedQuality = "original"; }}
             class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "image" ? "bg-[#f59e0b] text-black font-bold" : "text-[#5e6c87] hover:text-[#d6deeb]"
+              selectedMode === "image" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
             }`}
           >
             <ImageIcon class="w-3 h-3" />
-            <span>Foto</span>
+            <span>foto</span>
           </button>
         </div>
 
-        <!-- Selector de Calidad -->
-        <div class="relative">
+        <!-- Quality Selector (Corregido fondo oscuro y texto nítido) -->
+        <div class="relative flex items-center">
           <select
             bind:value={selectedQuality}
-            class="w-full h-full bg-[#07090e] border border-[#1e263a] focus:border-[#f59e0b] rounded px-2.5 py-1.5 text-xs text-[#d6deeb] font-mono focus:outline-none"
+            class="w-full h-full bg-[#090a0f]! text-white! border border-[#27272a] focus:border-[#71717a] rounded px-3 py-1.5 text-xs font-mono focus:outline-none appearance-none cursor-pointer"
           >
             {#if selectedMode === "video"}
-              <option value="best">Máxima Calidad (Original)</option>
-              <option value="1080p">1080p FHD</option>
-              <option value="720p">720p HD</option>
+              <option value="best" class="bg-[#10121a] text-white">Máxima Calidad (Original)</option>
+              <option value="1080p" class="bg-[#10121a] text-white">1080p FHD</option>
+              <option value="720p" class="bg-[#10121a] text-white">720p HD</option>
             {:else if selectedMode === "audio"}
-              <option value="mp3">MP3 320kbps</option>
-              <option value="m4a">M4A (AAC)</option>
-              <option value="flac">FLAC Lossless</option>
+              <option value="mp3" class="bg-[#10121a] text-white">MP3 320kbps</option>
+              <option value="m4a" class="bg-[#10121a] text-white">M4A (AAC)</option>
+              <option value="flac" class="bg-[#10121a] text-white">FLAC Lossless</option>
             {:else}
-              <option value="original">Imagen Alta Resolución</option>
+              <option value="original" class="bg-[#10121a] text-white">Imagen Alta Resolución</option>
             {/if}
           </select>
+          <div class="pointer-events-none absolute right-2.5 flex items-center text-[#71717a]">
+            <ChevronDown class="w-3.5 h-3.5" />
+          </div>
         </div>
 
-        <!-- Carpeta Destino -->
+        <!-- Destination Folder Button -->
         <button
           onclick={selectFolder}
-          class="flex items-center justify-between bg-[#07090e] border border-[#1e263a] hover:border-[#f59e0b]/50 px-2.5 py-1.5 rounded text-xs text-[#8b9bb4] transition-colors truncate cursor-pointer text-left"
+          class="flex items-center justify-between bg-[#090a0f] border border-[#27272a] hover:border-[#71717a] px-3 py-1.5 rounded text-xs text-[#a1a1aa] hover:text-white transition-colors truncate cursor-pointer text-left"
         >
           <div class="flex items-center gap-1.5 truncate">
-            <HardDrive class="w-3 h-3 text-[#f59e0b] shrink-0" />
+            <HardDrive class="w-3 h-3 text-[#71717a] shrink-0" />
             <span class="truncate">{downloadFolder}</span>
           </div>
-          <span class="text-[10px] text-[#5e6c87] shrink-0 ml-1">Elegir</span>
+          <span class="text-[10px] text-[#71717a] shrink-0 ml-1">dir</span>
         </button>
       </div>
 
-      <!-- Action Button -->
+      <!-- Download Button -->
       <div class="pt-1">
         <button
           onclick={handleDownload}
           disabled={!urlInput.trim()}
-          class="w-full py-2.5 rounded bg-[#f59e0b] hover:bg-[#fbbf24] active:bg-[#d97706] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-[#f59e0b]/10"
+          class="w-full py-2.5 rounded bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer"
         >
           <Download class="w-3.5 h-3.5 stroke-[2.5]" />
-          <span>Procesar y Descargar</span>
+          <span>ejecutar descarga</span>
         </button>
       </div>
     </div>
 
-    <!-- Active Tasks Console (Downloads List) -->
+    <!-- Active Tasks Terminal Output -->
     <div class="space-y-2">
-      <div class="flex items-center justify-between text-xs text-[#5e6c87] border-b border-[#141a29] pb-1.5">
-        <span class="uppercase tracking-wider font-semibold">
-          Cola de Descargas [{downloads.length}]
+      <div class="flex items-center justify-between text-xs text-[#71717a] border-b border-[#27272a] pb-1.5">
+        <span class="font-bold text-[#a1a1aa]">
+          // cola_procesos [{downloads.length}]
         </span>
         {#if downloads.length > 0}
           <button
             onclick={() => (downloads = [])}
-            class="text-[11px] text-[#5e6c87] hover:text-[#d6deeb] transition-colors cursor-pointer"
+            class="text-[11px] text-[#71717a] hover:text-white transition-colors cursor-pointer"
           >
-            Limpiar registro
+            clear
           </button>
         {/if}
       </div>
 
       {#if downloads.length === 0}
-        <div class="p-8 border border-dashed border-[#171e2e] rounded-lg flex flex-col items-center justify-center text-[#414d66] text-xs space-y-1">
-          <Download class="w-6 h-6 stroke-1 opacity-40" />
-          <span>Sin tareas activas. Pega un enlace arriba para procesar.</span>
+        <div class="p-6 border border-dashed border-[#27272a] rounded flex flex-col items-center justify-center text-[#52525b] text-xs space-y-1">
+          <Terminal class="w-5 h-5 opacity-40 mb-1" />
+          <span>esperando comandos... pega un enlace arriba</span>
         </div>
       {:else}
-        <div class="space-y-2">
+        <div class="space-y-1.5">
           {#each downloads as item (item.id)}
-            <div class="bg-[#0b0e17] border border-[#1b2234] rounded p-3 transition-all space-y-2">
+            <div class="bg-[#10121a] border border-[#27272a] rounded p-2.5 transition-all space-y-2">
               <div class="flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2.5 min-w-0">
-                  <div class="w-7 h-7 rounded bg-[#07090e] border border-[#1e263a] flex items-center justify-center shrink-0">
+                  <div class="w-6 h-6 rounded bg-[#18181b] border border-[#27272a] flex items-center justify-center shrink-0">
                     {#if item.mode === "audio"}
-                      <Music class="w-3.5 h-3.5 text-[#34d399]" />
+                      <Music class="w-3 h-3 text-[#d4d4d8]" />
                     {:else if item.mode === "image"}
-                      <ImageIcon class="w-3.5 h-3.5 text-[#f59e0b]" />
+                      <ImageIcon class="w-3 h-3 text-[#d4d4d8]" />
                     {:else}
-                      <Video class="w-3.5 h-3.5 text-[#60a5fa]" />
+                      <Video class="w-3 h-3 text-[#d4d4d8]" />
                     {/if}
                   </div>
                   <div class="min-w-0">
-                    <p class="text-xs font-medium text-white truncate font-sans">{item.title}</p>
-                    <div class="flex items-center gap-2 text-[10px] text-[#5e6c87]">
-                      <span class="uppercase text-[#8b9bb4]">{item.mode} // {item.quality}</span>
+                    <p class="text-xs font-medium text-white truncate">{item.title}</p>
+                    <div class="flex items-center gap-2 text-[10px] text-[#71717a]">
+                      <span class="text-[#a1a1aa]">{item.mode} // {item.quality}</span>
                       {#if item.speed}
                         <span>• {item.speed}</span>
                       {/if}
@@ -441,27 +438,27 @@
 
                 <div class="flex items-center gap-2 shrink-0 text-xs">
                   {#if item.status === "downloading"}
-                    <span class="font-bold text-[#f59e0b] font-mono">{item.percent.toFixed(0)}%</span>
+                    <span class="font-bold text-white font-mono">{item.percent.toFixed(0)}%</span>
                   {:else if item.status === "processing"}
-                    <div class="flex items-center gap-1 text-[#f59e0b]">
+                    <div class="flex items-center gap-1 text-white">
                       <Loader2 class="w-3 h-3 animate-spin" />
-                      <span class="text-[11px]">Remuxing...</span>
+                      <span class="text-[11px]">remux</span>
                     </div>
                   {:else if item.status === "finished"}
-                    <div class="flex items-center gap-1 text-[#34d399]">
-                      <CheckCircle2 class="w-3.5 h-3.5" />
-                      <span class="text-[11px]">Guardado</span>
+                    <div class="flex items-center gap-1 text-white">
+                      <Check class="w-3.5 h-3.5 stroke-[3]" />
+                      <span class="text-[11px]">completado</span>
                     </div>
                   {:else if item.status === "error"}
-                    <span class="text-[11px] text-[#f87171]" title={item.errorMsg}>Fallo</span>
+                    <span class="text-[11px] text-[#fca5a5]" title={item.errorMsg}>error</span>
                   {/if}
                 </div>
               </div>
 
               {#if item.status === "downloading" || item.status === "processing"}
-                <div class="w-full bg-[#07090e] border border-[#171e2e] rounded-full h-1 overflow-hidden">
+                <div class="w-full bg-[#090a0f] border border-[#27272a] rounded-full h-1 overflow-hidden">
                   <div
-                    class="bg-[#f59e0b] h-full transition-all duration-300"
+                    class="bg-white h-full transition-all duration-300"
                     style="width: {item.percent}%"
                   ></div>
                 </div>
