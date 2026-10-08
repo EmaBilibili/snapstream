@@ -1,0 +1,40 @@
+# Maintainer: Emanuel Binimelis <c.binimelis@alumno.um.edu.ar>
+pkgname=snapstream-bin
+_pkgname=snapstream
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Descargador multimedia hiperligero para video, audio y fotos (YouTube, Instagram, Facebook, TikTok)"
+arch=('x86_64')
+url="https://github.com/EmaBilibili/snapstream"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg')
+provides=('snapstream')
+conflicts=('snapstream')
+options=(!strip)
+
+source=(
+    "${pkgname}-${pkgver}.AppImage::https://github.com/EmaBilibili/snapstream/releases/download/v${pkgver}/SnapStream_${pkgver}_amd64.AppImage"
+    "snapstream.desktop"
+)
+sha256sums=(
+    'df7982a1866f5f58827862efa584fb17b2311708541712c22bb48a1a6f2a5722'
+    'SKIP'
+)
+
+prepare() {
+    chmod +x "${pkgname}-${pkgver}.AppImage"
+    ./"${pkgname}-${pkgver}.AppImage" --appimage-extract > /dev/null 2>&1 || true
+}
+
+package() {
+    # Instalar binario ejecutable
+    install -Dm755 "${srcdir}/squashfs-root/usr/bin/snapstream" "${pkgdir}/usr/bin/snapstream"
+
+    # Instalar lanzador de escritorio
+    install -Dm644 "${srcdir}/snapstream.desktop" "${pkgdir}/usr/share/applications/snapstream.desktop"
+
+    # Instalar iconos
+    if [ -d "${srcdir}/squashfs-root/usr/share/icons" ]; then
+        cp -r "${srcdir}/squashfs-root/usr/share/icons" "${pkgdir}/usr/share/"
+    fi
+}
