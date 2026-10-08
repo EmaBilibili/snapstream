@@ -1,14 +1,17 @@
+use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub title: String,
     pub thumbnail: Option<String>,
     pub duration: Option<f64>,
     pub uploader: Option<String>,
+    pub is_direct_image: bool,
     pub formats_summary: Vec<String>,
 }
 
@@ -34,65 +37,194 @@ fn get_ytdlp_cmd() -> std::path::PathBuf {
     std::path::PathBuf::from("yt-dlp")
 }
 
+// Normaliza URLs de Facebook y Reels para evitar errores del extractor
+fn normalize_social_url(url: &str) -> String {
+    let mut clean = url.trim().to_string();
+    if clean.contains("facebook.com/share/r/") || clean.contains("facebook.com/share/v/") {
+        // Facebook share URL redirection helper
+        return clean;
+    }
+    clean
+}
+
+// Extrae metadatos OpenGraph (og:image, og:title, og:video) directamente vía HTTP si es necesario
+async fn extract_og_metadata(url: &str) -> Option<MediaMetadata> {
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+        .build()
+        .ok()?;
+
+    let res = client.get(url).send().await.ok()?;
+    let text = res.text().await.ok()?;
+    let document = Html::parse_document(&text);
+
+    let title_sel = Selector::parse("meta[property='og:title']").ok()?;
+    let img_sel = Selector::parse("meta[property='og:image']").ok()?;
+    let video_sel = Selector::parse("meta[property='og:video']").ok()?;
+
+    let title = document
+        .select(&title_sel)
+        .next()
+        .and_then(|el| el.value().attr("content"))
+        .unwrap_or("Contenido Multimedia")
+        .to_string();
+
+    let thumbnail = document
+        .select(&img_sel)
+        .next()
+        .and_then(|el| el.value().attr("content"))
+        .map(|s| s.to_string());
+
+    let has_video = document.select(&video_sel).next().is_some();
+
+    Some(MediaMetadata {
+        title,
+        thumbnail,
+        duration: None,
+        uploader: None,
+        is_direct_image: !has_video,
+        formats_summary: if has_video {
+            vec!["Video Original".into(), "Solo Audio (MP3)".into()]
+        } else {
+            vec!["Imagen Alta Resolución".into()]
+        },
+    })
+}
+
 #[tauri::command]
-fn get_media_info(url: String) -> Result<MediaMetadata, String> {
+async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
+    let clean_url = normalize_social_url(&url);
     let ytdlp_path = get_ytdlp_cmd();
 
+    // Intentar con yt-dlp usando cabeceras de navegador real
     let output = Command::new(&ytdlp_path)
         .args([
             "--dump-json",
             "--no-playlist",
             "--no-warnings",
-            &url,
+            "--add-header",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            &clean_url,
         ])
-        .output()
-        .map_err(|e| format!("Error al ejecutar yt-dlp: {}", e))?;
+        .output();
 
-    if !output.status.success() {
-        let err_str = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("No se pudo obtener información del enlace: {}", err_str));
+    if let Ok(out) = output {
+        if out.status.success() {
+            let json_str = String::from_utf8_lossy(&out.stdout);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let title = v["title"].as_str().unwrap_or("Sin título").to_string();
+                let thumbnail = v["thumbnail"].as_str().map(|s| s.to_string());
+                let duration = v["duration"].as_f64();
+                let uploader = v["uploader"].as_str().map(|s| s.to_string());
+
+                return Ok(MediaMetadata {
+                    title,
+                    thumbnail,
+                    duration,
+                    uploader,
+                    is_direct_image: false,
+                    formats_summary: vec![
+                        "Mejor calidad".to_string(),
+                        "1080p".to_string(),
+                        "720p".to_string(),
+                        "Solo Audio (MP3)".to_string(),
+                        "Extraer Miniatura/Imagen".to_string(),
+                    ],
+                });
+            }
+        }
     }
 
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let v: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| format!("Error analizando metadatos: {}", e))?;
+    // Si yt-dlp falla (como en imágenes directas o posts cerrados de IG/FB), intentar fallback OpenGraph
+    if let Some(og) = extract_og_metadata(&clean_url).await {
+        return Ok(og);
+    }
 
-    let title = v["title"].as_str().unwrap_or("Sin título").to_string();
-    let thumbnail = v["thumbnail"].as_str().map(|s| s.to_string());
-    let duration = v["duration"].as_f64();
-    let uploader = v["uploader"].as_str().map(|s| s.to_string());
-
-    Ok(MediaMetadata {
-        title,
-        thumbnail,
-        duration,
-        uploader,
-        formats_summary: vec![
-            "Mejor calidad".to_string(),
-            "1080p".to_string(),
-            "720p".to_string(),
-            "Solo Audio (MP3)".to_string(),
-        ],
-    })
+    Err("No se pudo obtener información del enlace. Comprueba que el post sea público.".to_string())
 }
 
 #[tauri::command]
-fn start_download(
+async fn start_download(
     app: AppHandle,
     id: String,
     url: String,
     output_dir: String,
-    mode: String,
+    mode: String, // "video", "audio", "image"
     quality: String,
+    thumbnail_url: Option<String>,
 ) -> Result<String, String> {
-    let ytdlp_path = get_ytdlp_cmd();
     let download_id = id.clone();
+    let clean_url = normalize_social_url(&url);
 
+    // Caso: Descarga de imagen directa / carátula
+    if mode == "image" {
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let target_img_url = thumbnail_url.unwrap_or_else(|| clean_url.clone());
+            
+            let _ = app.emit(
+                "download-progress",
+                DownloadProgress {
+                    id: download_id.clone(),
+                    percent: 20.0,
+                    speed: "Descargando imagen...".into(),
+                    eta: "".into(),
+                    status: "downloading".into(),
+                    filename: None,
+                },
+            );
+
+            match client.get(&target_img_url).send().await {
+                Ok(resp) => {
+                    if let Ok(bytes) = resp.bytes().await {
+                        let filename = format!("{}/snapstream_img_{}.jpg", output_dir.trim_end_matches('/'), &download_id);
+                        if let Ok(mut file) = File::create(&filename) {
+                            let _ = file.write_all(&bytes);
+                            let _ = app.emit(
+                                "download-progress",
+                                DownloadProgress {
+                                    id: download_id,
+                                    percent: 100.0,
+                                    speed: "".into(),
+                                    eta: "".into(),
+                                    status: "finished".into(),
+                                    filename: Some(filename),
+                                },
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "download-progress",
+                        DownloadProgress {
+                            id: download_id,
+                            percent: 0.0,
+                            speed: "".into(),
+                            eta: "".into(),
+                            status: "error".into(),
+                            filename: Some(e.to_string()),
+                        },
+                    );
+                    return;
+                }
+            }
+        });
+        return Ok(id);
+    }
+
+    // Caso: Video o Audio vía yt-dlp
+    let ytdlp_path = get_ytdlp_cmd();
     std::thread::spawn(move || {
         let mut cmd = Command::new(&ytdlp_path);
         let output_template = format!("{}/%(title)s.%(ext)s", output_dir.trim_end_matches('/'));
 
         cmd.args(["--newline", "-o", &output_template]);
+        cmd.args([
+            "--add-header",
+            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        ]);
 
         if mode == "audio" {
             cmd.args([
@@ -103,10 +235,10 @@ fn start_download(
         } else {
             match quality.as_str() {
                 "1080p" => {
-                    cmd.args(["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"]);
+                    cmd.args(["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"]);
                 }
                 "720p" => {
-                    cmd.args(["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]"]);
+                    cmd.args(["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best"]);
                 }
                 _ => {
                     cmd.args(["-f", "bestvideo+bestaudio/best"]);
@@ -115,7 +247,7 @@ fn start_download(
             cmd.args(["--merge-output-format", "mp4"]);
         }
 
-        cmd.arg(&url);
+        cmd.arg(&clean_url);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
