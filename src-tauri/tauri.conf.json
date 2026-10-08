@@ -38,6 +38,7 @@
   },
   "plugins": {
     "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCRkJEQ0E1NjE0NTU5ODYKUldTR1dVVmhwZHo3cTBqS0VBYlZ0cFVzNWtYTnFNZFk2NHUrYkxNWlhlalpxSGJEMjh6eXdITEMK",
       "endpoints": [
         "https://github.com/EmaBilibili/snapstream/releases/latest/download/latest.json"
       ]
