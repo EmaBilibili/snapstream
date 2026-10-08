@@ -404,8 +404,8 @@
 
       {#if downloads.length === 0}
         <div class="p-6 border border-dashed border-[#27272a] rounded flex flex-col items-center justify-center text-[#52525b] text-xs space-y-1">
-          <Terminal class="w-5 h-5 opacity-40 mb-1" />
-          <span>esperando comandos... pega un enlace arriba</span>
+          <Magnet class="w-5 h-5 opacity-40 mb-1" />
+          <span>esperando enlaces... pega uno arriba</span>
         </div>
       {:else}
         <div class="space-y-1.5">
