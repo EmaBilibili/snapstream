@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "snapstream",
+  "productName": "SnapStream",
   "version": "0.1.0",
-  "identifier": "com.rayoperonizador.snapstream",
+  "identifier": "com.emabilibili.snapstream",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "snapstream",
-        "width": 800,
-        "height": 600
+        "title": "SnapStream",
+        "width": 920,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 540,
+        "center": true,
+        "decorations": true
       }
     ],
     "security": {
@@ -31,5 +35,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/EmaBilibili/snapstream/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
