@@ -18,8 +18,16 @@
     Clipboard,
     HardDrive,
     ChevronDown,
-    Activity
+    Activity,
+    FolderOpen,
+    ListMusic,
+    Trash2
   } from "lucide-svelte";
+
+  interface PlaylistItem {
+    url: string;
+    title: string;
+  }
 
   interface MediaMetadata {
     title: string;
@@ -27,6 +35,9 @@
     duration: number | null;
     uploader: string | null;
     is_direct_image: boolean;
+    is_playlist: boolean;
+    playlist_count: number | null;
+    playlist_items: PlaylistItem[] | null;
     formats_summary: string[];
   }
 
@@ -42,6 +53,7 @@
     eta: string;
     status: "queued" | "downloading" | "processing" | "finished" | "error";
     errorMsg?: string;
+    outputPath?: string;
   }
 
   let urlInput = $state("");
@@ -54,6 +66,26 @@
   let downloads = $state<DownloadItem[]>([]);
   let updateStatus = $state<string | null>(null);
   let isCheckingUpdate = $state(false);
+
+  // Cargar historial persistente de LocalStorage
+  function loadHistory() {
+    try {
+      const stored = localStorage.getItem("snapstream_history");
+      if (stored) {
+        downloads = JSON.parse(stored);
+      }
+      const savedDir = localStorage.getItem("snapstream_dir");
+      if (savedDir) {
+        downloadFolder = savedDir;
+      }
+    } catch (_) {}
+  }
+
+  function saveHistory() {
+    try {
+      localStorage.setItem("snapstream_history", JSON.stringify(downloads.slice(0, 30)));
+    } catch (_) {}
+  }
 
   function formatDuration(sec: number | null): string {
     if (!sec) return "";
@@ -100,7 +132,17 @@
       });
       if (selected && typeof selected === "string") {
         downloadFolder = selected;
+        localStorage.setItem("snapstream_dir", selected);
       }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function openInFolder(item: DownloadItem) {
+    try {
+      const target = item.outputPath || downloadFolder;
+      await invoke("open_path_in_file_manager", { path: target });
     } catch (e) {
       console.error(e);
     }
@@ -108,14 +150,28 @@
 
   async function handleDownload() {
     if (!urlInput.trim()) return;
-    const id = Date.now().toString();
+
+    // Si es una playlist, descargar todos los elementos detectados
+    if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
+      const items = currentPreview.playlist_items;
+      for (const item of items) {
+        triggerSingleDownload(item.url, item.title, currentPreview.thumbnail);
+      }
+      return;
+    }
+
     const title = currentPreview?.title || "recurso_multimedia";
-    const thumbnail = currentPreview?.thumbnail || null;
+    const thumb = currentPreview?.thumbnail || null;
+    triggerSingleDownload(urlInput.trim(), title, thumb);
+  }
+
+  async function triggerSingleDownload(url: string, title: string, thumbnail: string | null) {
+    const id = Date.now().toString() + Math.random().toString(36).substring(2, 5);
 
     const newItem: DownloadItem = {
       id,
-      url: urlInput.trim(),
-      title: String(title),
+      url,
+      title,
       thumbnail,
       mode: selectedMode,
       quality: selectedQuality,
@@ -126,23 +182,30 @@
     };
 
     downloads = [newItem, ...downloads];
+    saveHistory();
 
     try {
       await invoke("start_download", {
         id,
-        url: urlInput.trim(),
+        url,
         outputDir: downloadFolder,
         mode: selectedMode,
         quality: selectedQuality,
         thumbnailUrl: thumbnail
       });
     } catch (err: any) {
-      const item = downloads.find((d) => d.id === id);
-      if (item) {
-        item.status = "error";
-        item.errorMsg = err?.toString();
+      const itm = downloads.find((d) => d.id === id);
+      if (itm) {
+        itm.status = "error";
+        itm.errorMsg = err?.toString();
+        saveHistory();
       }
     }
+  }
+
+  function clearHistory() {
+    downloads = [];
+    localStorage.removeItem("snapstream_history");
   }
 
   async function checkForUpdates() {
@@ -168,6 +231,8 @@
   }
 
   onMount(() => {
+    loadHistory();
+
     const unlisten = listen<any>("download-progress", (event) => {
       const payload = event.payload;
       const item = downloads.find((d) => d.id === payload.id);
@@ -176,8 +241,14 @@
         item.speed = payload.speed;
         item.eta = payload.eta;
         item.status = payload.status;
+        if (payload.output_path) {
+          item.outputPath = payload.output_path;
+        }
         if (payload.filename) {
           item.errorMsg = payload.filename;
+        }
+        if (payload.status === "finished" || payload.status === "error") {
+          saveHistory();
         }
       }
     });
@@ -188,12 +259,10 @@
   });
 </script>
 
-<!-- Terminal Shell Container: Puro Blanco, Negro y Escala de Grises Monocromática -->
 <div class="flex-1 flex flex-col w-full h-full min-h-screen bg-[#090a0f] text-[#d4d4d8] font-mono selection:bg-[#e4e4e7] selection:text-black">
-  
   <div class="flex-1 flex flex-col max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-4">
     
-    <!-- Header: Terminal Window Bar -->
+    <!-- Header -->
     <header class="flex items-center justify-between pb-3 border-b border-[#27272a]">
       <div class="flex items-center gap-2.5">
         <div class="w-7 h-7 rounded border border-[#3f3f46] bg-[#18181b] flex items-center justify-center text-white">
@@ -226,8 +295,6 @@
 
     <!-- Console Input Panel -->
     <div class="bg-[#10121a] border border-[#27272a] rounded p-4 space-y-3.5">
-      
-      <!-- Prompt Title & Paste -->
       <div class="flex items-center justify-between text-[11px] text-[#71717a]">
         <div class="flex items-center gap-1.5">
           <span class="text-white font-bold">$</span>
@@ -242,7 +309,6 @@
         </button>
       </div>
 
-      <!-- Input Field -->
       <div class="flex flex-col sm:flex-row gap-2">
         <div class="relative flex-1">
           <input
@@ -274,7 +340,7 @@
         </div>
       {/if}
 
-      <!-- Media Preview -->
+      <!-- Media Preview Card -->
       {#if currentPreview}
         <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center">
           {#if currentPreview.thumbnail}
@@ -285,10 +351,18 @@
             />
           {/if}
           <div class="flex-1 min-w-0 space-y-1">
-            <h2 class="text-xs font-bold text-white truncate" title={currentPreview.title}>
-              {currentPreview.title}
-            </h2>
+            <div class="flex items-center gap-2">
+              {#if currentPreview.is_playlist}
+                <ListMusic class="w-3.5 h-3.5 text-white shrink-0" />
+              {/if}
+              <h2 class="text-xs font-bold text-white truncate" title={currentPreview.title}>
+                {currentPreview.title}
+              </h2>
+            </div>
             <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[#71717a]">
+              {#if currentPreview.is_playlist}
+                <span class="text-white">[Playlist: {currentPreview.playlist_count || currentPreview.playlist_items?.length} items]</span>
+              {/if}
               {#if currentPreview.uploader}
                 <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
               {/if}
@@ -303,10 +377,8 @@
         </div>
       {/if}
 
-      <!-- Command Controls: Mode / Quality / Path -->
+      <!-- Controls -->
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
-        
-        <!-- Mode Switcher -->
         <div class="flex bg-[#090a0f] p-0.5 rounded border border-[#27272a]">
           <button
             onclick={() => { selectedMode = "video"; selectedQuality = "best"; }}
@@ -337,7 +409,6 @@
           </button>
         </div>
 
-        <!-- Quality Selector (Corregido fondo oscuro y texto nítido) -->
         <div class="relative flex items-center">
           <select
             bind:value={selectedQuality}
@@ -360,7 +431,6 @@
           </div>
         </div>
 
-        <!-- Destination Folder Button -->
         <button
           onclick={selectFolder}
           class="flex items-center justify-between bg-[#090a0f] border border-[#27272a] hover:border-[#71717a] px-3 py-1.5 rounded text-xs text-[#a1a1aa] hover:text-white transition-colors truncate cursor-pointer text-left"
@@ -373,7 +443,6 @@
         </button>
       </div>
 
-      <!-- Download Button -->
       <div class="pt-1">
         <button
           onclick={handleDownload}
@@ -381,12 +450,12 @@
           class="w-full py-2.5 rounded bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer"
         >
           <Download class="w-3.5 h-3.5 stroke-[2.5]" />
-          <span>ejecutar descarga</span>
+          <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
         </button>
       </div>
     </div>
 
-    <!-- Active Tasks Terminal Output -->
+    <!-- Active Tasks & Persistent History -->
     <div class="space-y-2">
       <div class="flex items-center justify-between text-xs text-[#71717a] border-b border-[#27272a] pb-1.5">
         <span class="font-bold text-[#a1a1aa]">
@@ -394,10 +463,11 @@
         </span>
         {#if downloads.length > 0}
           <button
-            onclick={() => (downloads = [])}
-            class="text-[11px] text-[#71717a] hover:text-white transition-colors cursor-pointer"
+            onclick={clearHistory}
+            class="flex items-center gap-1 text-[11px] text-[#71717a] hover:text-white transition-colors cursor-pointer"
           >
-            clear
+            <Trash2 class="w-3 h-3" />
+            <span>limpiar</span>
           </button>
         {/if}
       </div>
@@ -445,9 +515,18 @@
                       <span class="text-[11px]">remux</span>
                     </div>
                   {:else if item.status === "finished"}
-                    <div class="flex items-center gap-1 text-white">
-                      <Check class="w-3.5 h-3.5 stroke-[3]" />
-                      <span class="text-[11px]">completado</span>
+                    <div class="flex items-center gap-1.5">
+                      <button
+                        onclick={() => openInFolder(item)}
+                        class="flex items-center gap-1 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2 py-0.5 rounded transition-colors cursor-pointer"
+                        title="Abrir archivo o carpeta"
+                      >
+                        <FolderOpen class="w-3 h-3" />
+                        <span>abrir</span>
+                      </button>
+                      <div class="flex items-center gap-0.5 text-white">
+                        <Check class="w-3.5 h-3.5 stroke-[3]" />
+                      </div>
                     </div>
                   {:else if item.status === "error"}
                     <span class="text-[11px] text-[#fca5a5]" title={item.errorMsg}>error</span>

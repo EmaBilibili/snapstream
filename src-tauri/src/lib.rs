@@ -6,12 +6,21 @@ use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistItem {
+    pub url: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaMetadata {
     pub title: String,
     pub thumbnail: Option<String>,
     pub duration: Option<f64>,
     pub uploader: Option<String>,
     pub is_direct_image: bool,
+    pub is_playlist: bool,
+    pub playlist_count: Option<usize>,
+    pub playlist_items: Option<Vec<PlaylistItem>>,
     pub formats_summary: Vec<String>,
 }
 
@@ -23,6 +32,7 @@ pub struct DownloadProgress {
     pub eta: String,
     pub status: String,
     pub filename: Option<String>,
+    pub output_path: Option<String>,
 }
 
 fn get_ytdlp_cmd() -> std::path::PathBuf {
@@ -37,17 +47,10 @@ fn get_ytdlp_cmd() -> std::path::PathBuf {
     std::path::PathBuf::from("yt-dlp")
 }
 
-// Normaliza URLs de Facebook y Reels para evitar errores del extractor
 fn normalize_social_url(url: &str) -> String {
-    let mut clean = url.trim().to_string();
-    if clean.contains("facebook.com/share/r/") || clean.contains("facebook.com/share/v/") {
-        // Facebook share URL redirection helper
-        return clean;
-    }
-    clean
+    url.trim().to_string()
 }
 
-// Extrae metadatos OpenGraph (og:image, og:title, og:video) directamente vía HTTP si es necesario
 async fn extract_og_metadata(url: &str) -> Option<MediaMetadata> {
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
@@ -66,7 +69,7 @@ async fn extract_og_metadata(url: &str) -> Option<MediaMetadata> {
         .select(&title_sel)
         .next()
         .and_then(|el| el.value().attr("content"))
-        .unwrap_or("Contenido Multimedia")
+        .unwrap_or("Recurso Multimedia")
         .to_string();
 
     let thumbnail = document
@@ -83,6 +86,9 @@ async fn extract_og_metadata(url: &str) -> Option<MediaMetadata> {
         duration: None,
         uploader: None,
         is_direct_image: !has_video,
+        is_playlist: false,
+        playlist_count: None,
+        playlist_items: None,
         formats_summary: if has_video {
             vec!["Video Original".into(), "Solo Audio (MP3)".into()]
         } else {
@@ -96,11 +102,11 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
     let clean_url = normalize_social_url(&url);
     let ytdlp_path = get_ytdlp_cmd();
 
-    // Intentar con yt-dlp usando cabeceras de navegador real
+    // Comprobar primero con flat-playlist para detectar playlists sin descargar todo el contenido
     let output = Command::new(&ytdlp_path)
         .args([
-            "--dump-json",
-            "--no-playlist",
+            "--dump-single-json",
+            "--flat-playlist",
             "--no-warnings",
             "--add-header",
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
@@ -112,10 +118,31 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
         if out.status.success() {
             let json_str = String::from_utf8_lossy(&out.stdout);
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                let is_playlist = v.get("_type").and_then(|t| t.as_str()) == Some("playlist");
                 let title = v["title"].as_str().unwrap_or("Sin título").to_string();
                 let thumbnail = v["thumbnail"].as_str().map(|s| s.to_string());
                 let duration = v["duration"].as_f64();
                 let uploader = v["uploader"].as_str().map(|s| s.to_string());
+
+                let mut items = Vec::new();
+                let mut count = None;
+
+                if is_playlist {
+                    if let Some(entries) = v["entries"].as_array() {
+                        count = Some(entries.len());
+                        for e in entries.iter().take(50) {
+                            let entry_url = e["url"]
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| clean_url.clone());
+                            let entry_title = e["title"].as_str().unwrap_or("Pista").to_string();
+                            items.push(PlaylistItem {
+                                url: entry_url,
+                                title: entry_title,
+                            });
+                        }
+                    }
+                }
 
                 return Ok(MediaMetadata {
                     title,
@@ -123,24 +150,70 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
                     duration,
                     uploader,
                     is_direct_image: false,
+                    is_playlist,
+                    playlist_count: count,
+                    playlist_items: if is_playlist { Some(items) } else { None },
                     formats_summary: vec![
                         "Mejor calidad".to_string(),
                         "1080p".to_string(),
                         "720p".to_string(),
                         "Solo Audio (MP3)".to_string(),
-                        "Extraer Miniatura/Imagen".to_string(),
                     ],
                 });
             }
         }
     }
 
-    // Si yt-dlp falla (como en imágenes directas o posts cerrados de IG/FB), intentar fallback OpenGraph
     if let Some(og) = extract_og_metadata(&clean_url).await {
         return Ok(og);
     }
 
-    Err("No se pudo obtener información del enlace. Comprueba que el post sea público.".to_string())
+    Err("No se pudo obtener información del enlace. Verifica si es público.".to_string())
+}
+
+#[tauri::command]
+async fn open_path_in_file_manager(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut p = std::path::PathBuf::from(&path);
+        if p.is_file() {
+            Command::new("explorer")
+                .args(["/select,", &path])
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        } else {
+            Command::new("explorer")
+                .arg(&path)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let p = std::path::PathBuf::from(&path);
+        let target_dir = if p.is_file() {
+            p.parent().unwrap_or(&p).to_string_lossy().to_string()
+        } else {
+            path
+        };
+        Command::new("xdg-open")
+            .arg(&target_dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
 }
 
 #[tauri::command]
@@ -149,35 +222,41 @@ async fn start_download(
     id: String,
     url: String,
     output_dir: String,
-    mode: String, // "video", "audio", "image"
+    mode: String,
     quality: String,
     thumbnail_url: Option<String>,
 ) -> Result<String, String> {
     let download_id = id.clone();
     let clean_url = normalize_social_url(&url);
+    let resolved_output_dir = output_dir.clone();
 
-    // Caso: Descarga de imagen directa / carátula
+    // Caso: Descarga de Imagen
     if mode == "image" {
         tokio::spawn(async move {
             let client = reqwest::Client::new();
             let target_img_url = thumbnail_url.unwrap_or_else(|| clean_url.clone());
-            
+
             let _ = app.emit(
                 "download-progress",
                 DownloadProgress {
                     id: download_id.clone(),
-                    percent: 20.0,
-                    speed: "Descargando imagen...".into(),
+                    percent: 25.0,
+                    speed: "Descargando...".into(),
                     eta: "".into(),
                     status: "downloading".into(),
                     filename: None,
+                    output_path: None,
                 },
             );
 
             match client.get(&target_img_url).send().await {
                 Ok(resp) => {
                     if let Ok(bytes) = resp.bytes().await {
-                        let filename = format!("{}/snapstream_img_{}.jpg", output_dir.trim_end_matches('/'), &download_id);
+                        let filename = format!(
+                            "{}/snapstream_img_{}.jpg",
+                            resolved_output_dir.trim_end_matches('/'),
+                            &download_id
+                        );
                         if let Ok(mut file) = File::create(&filename) {
                             let _ = file.write_all(&bytes);
                             let _ = app.emit(
@@ -188,7 +267,8 @@ async fn start_download(
                                     speed: "".into(),
                                     eta: "".into(),
                                     status: "finished".into(),
-                                    filename: Some(filename),
+                                    filename: Some(filename.clone()),
+                                    output_path: Some(filename),
                                 },
                             );
                             return;
@@ -205,6 +285,7 @@ async fn start_download(
                             eta: "".into(),
                             status: "error".into(),
                             filename: Some(e.to_string()),
+                            output_path: None,
                         },
                     );
                     return;
@@ -214,11 +295,11 @@ async fn start_download(
         return Ok(id);
     }
 
-    // Caso: Video o Audio vía yt-dlp
+    // Caso: Video o Audio
     let ytdlp_path = get_ytdlp_cmd();
     std::thread::spawn(move || {
         let mut cmd = Command::new(&ytdlp_path);
-        let output_template = format!("{}/%(title)s.%(ext)s", output_dir.trim_end_matches('/'));
+        let output_template = format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'));
 
         cmd.args(["--newline", "-o", &output_template]);
         cmd.args([
@@ -263,16 +344,30 @@ async fn start_download(
                         eta: "".into(),
                         status: "error".into(),
                         filename: Some(e.to_string()),
+                        output_path: None,
                     },
                 );
                 return;
             }
         };
 
+        let mut final_file = None;
+
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
-                if line.starts_with("[download]") {
+                if line.contains("[download] Destination:") {
+                    let parts: Vec<&str> = line.split("[download] Destination:").collect();
+                    if parts.len() > 1 {
+                        final_file = Some(parts[1].trim().to_string());
+                    }
+                } else if line.contains("[Merger] Merging formats into") {
+                    let parts: Vec<&str> = line.split("[Merger] Merging formats into").collect();
+                    if parts.len() > 1 {
+                        let f = parts[1].trim().trim_matches('"').to_string();
+                        final_file = Some(f);
+                    }
+                } else if line.starts_with("[download]") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     let mut percent = 0.0;
                     let mut speed = String::new();
@@ -301,6 +396,7 @@ async fn start_download(
                             eta,
                             status: "downloading".into(),
                             filename: None,
+                            output_path: None,
                         },
                     );
                 } else if line.starts_with("[ExtractAudio]") || line.starts_with("[Merger]") {
@@ -313,6 +409,7 @@ async fn start_download(
                             eta: "".into(),
                             status: "processing".into(),
                             filename: None,
+                            output_path: None,
                         },
                     );
                 }
@@ -322,6 +419,7 @@ async fn start_download(
         let status = child.wait();
         match status {
             Ok(s) if s.success() => {
+                let out_target = final_file.unwrap_or(resolved_output_dir);
                 let _ = app.emit(
                     "download-progress",
                     DownloadProgress {
@@ -331,6 +429,7 @@ async fn start_download(
                         eta: "".into(),
                         status: "finished".into(),
                         filename: None,
+                        output_path: Some(out_target),
                     },
                 );
             }
@@ -343,7 +442,8 @@ async fn start_download(
                         speed: "".into(),
                         eta: "".into(),
                         status: "error".into(),
-                        filename: Some("Fallo en la descarga o procesamiento".into()),
+                        filename: Some("Fallo en la descarga".into()),
+                        output_path: None,
                     },
                 );
             }
@@ -361,7 +461,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_media_info, start_download])
+        .invoke_handler(tauri::generate_handler![
+            get_media_info,
+            start_download,
+            open_path_in_file_manager
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
