@@ -10,7 +10,7 @@
     Video,
     Image as ImageIcon,
     Folder,
-    Terminal,
+    Magnet,
     Check,
     AlertTriangle,
     Loader2,
@@ -197,7 +197,7 @@
     <header class="flex items-center justify-between pb-3 border-b border-[#27272a]">
       <div class="flex items-center gap-2.5">
         <div class="w-7 h-7 rounded border border-[#3f3f46] bg-[#18181b] flex items-center justify-center text-white">
-          <Terminal class="w-3.5 h-3.5 stroke-[2.2]" />
+          <Magnet class="w-3.5 h-3.5 stroke-[2.2]" />
         </div>
         <div class="flex items-center gap-2">
           <span class="text-xs font-bold tracking-wider text-white">snapstream</span>
