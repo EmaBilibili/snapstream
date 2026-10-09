@@ -21,7 +21,10 @@
     Activity,
     FolderOpen,
     ListMusic,
-    Trash2
+    Trash2,
+    Search,
+    X,
+    ExternalLink
   } from "lucide-svelte";
 
   interface PlaylistItem {
@@ -41,6 +44,15 @@
     formats_summary: string[];
   }
 
+  interface SearchResult {
+    id: string;
+    title: string;
+    uploader: string | null;
+    duration: number | null;
+    thumbnail: string | null;
+    url: string;
+  }
+
   interface DownloadItem {
     id: string;
     url: string;
@@ -56,7 +68,11 @@
     outputPath?: string;
   }
 
+  let activeTab = $state<"url" | "search">("url");
   let urlInput = $state("");
+  let searchQuery = $state("");
+  let searchResults = $state<SearchResult[]>([]);
+  let isSearching = $state(false);
   let selectedMode = $state<"video" | "audio" | "image">("video");
   let selectedQuality = $state("best");
   let downloadFolder = $state("~/Downloads");
@@ -94,6 +110,10 @@
     return `${m}:${s < 10 ? "0" : ""}${s}`;
   }
 
+  function isHttpUrl(str: string): boolean {
+    return /^https?:\/\//i.test(str.trim());
+  }
+
   async function pasteClipboard() {
     try {
       const text = await navigator.clipboard.readText();
@@ -105,17 +125,27 @@
   }
 
   async function handleInspectUrl() {
-    if (!urlInput.trim()) return;
+    const raw = urlInput.trim();
+    if (!raw) return;
+
+    // Si el usuario escribe texto (nombre de canción/artista) en vez de URL, cambiar al buscador
+    if (!isHttpUrl(raw)) {
+      activeTab = "search";
+      searchQuery = raw;
+      handleSearch();
+      return;
+    }
+
     errorMessage = "";
     isLoadingInfo = true;
     currentPreview = null;
 
     try {
-      const data = await invoke<MediaMetadata>("get_media_info", { url: urlInput.trim() });
+      const data = await invoke<MediaMetadata>("get_media_info", { url: raw });
       currentPreview = data;
       if (data.is_direct_image) {
         selectedMode = "image";
-      } else if (urlInput.includes("music.youtube.com") || urlInput.includes("spotify") || urlInput.includes("soundcloud")) {
+      } else if (raw.includes("music.youtube.com") || raw.includes("spotify") || raw.includes("soundcloud")) {
         selectedMode = "audio";
         selectedQuality = "mp3";
       }
@@ -123,6 +153,39 @@
       errorMessage = err?.toString() || "Error al obtener información del enlace.";
     } finally {
       isLoadingInfo = false;
+    }
+  }
+
+  async function handleSearch() {
+    const q = searchQuery.trim();
+    if (!q) return;
+    errorMessage = "";
+    isSearching = true;
+    searchResults = [];
+
+    try {
+      const results = await invoke<SearchResult[]>("search_music", { query: q });
+      searchResults = results;
+      if (results.length === 0) {
+        errorMessage = `No se encontraron resultados para "${q}".`;
+      }
+    } catch (err: any) {
+      errorMessage = err?.toString() || "Error al realizar la búsqueda de música.";
+    } finally {
+      isSearching = false;
+    }
+  }
+
+  function handleSearchInputKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      const q = searchQuery.trim();
+      if (isHttpUrl(q)) {
+        activeTab = "url";
+        urlInput = q;
+        handleInspectUrl();
+      } else {
+        handleSearch();
+      }
     }
   }
 
@@ -168,7 +231,15 @@
     triggerSingleDownload(urlInput.trim(), title, thumb);
   }
 
-  async function triggerSingleDownload(url: string, title: string, thumbnail: string | null) {
+  async function triggerSingleDownload(
+    url: string,
+    title: string,
+    thumbnail: string | null,
+    overrideMode?: "video" | "audio" | "image",
+    overrideQuality?: string
+  ) {
+    const mode = overrideMode || selectedMode;
+    const quality = overrideQuality || (mode === "audio" ? "mp3" : selectedQuality);
     const id = Date.now().toString() + Math.random().toString(36).substring(2, 5);
 
     const newItem: DownloadItem = {
@@ -176,8 +247,8 @@
       url,
       title,
       thumbnail,
-      mode: selectedMode,
-      quality: selectedQuality,
+      mode,
+      quality,
       percent: 0,
       speed: "0.0 KB/s",
       eta: "--:--",
@@ -192,8 +263,8 @@
         id,
         url,
         outputDir: downloadFolder,
-        mode: selectedMode,
-        quality: selectedQuality,
+        mode,
+        quality,
         thumbnailUrl: thumbnail
       });
     } catch (err: any) {
@@ -298,43 +369,360 @@
 
     <!-- Console Input Panel -->
     <div class="bg-[#10121a] border border-[#27272a] rounded p-4 space-y-3.5">
-      <div class="flex items-center justify-between text-[11px] text-[#71717a]">
-        <div class="flex items-center gap-1.5">
-          <span class="text-white font-bold">$</span>
-          <span>input_url --extract</span>
+      <!-- Tabs / Mode Bar -->
+      <div class="flex items-center justify-between border-b border-[#27272a] pb-2.5">
+        <div class="flex items-center gap-2">
+          <button
+            onclick={() => activeTab = "url"}
+            class={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded transition-all cursor-pointer font-mono ${
+              activeTab === "url"
+                ? "bg-[#18181b] border border-[#3f3f46] text-white font-bold"
+                : "text-[#71717a] hover:text-[#d4d4d8]"
+            }`}
+          >
+            <Magnet class="w-3 h-3" />
+            <span>$ enlace_url</span>
+          </button>
+          <button
+            onclick={() => activeTab = "search"}
+            class={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded transition-all cursor-pointer font-mono ${
+              activeTab === "search"
+                ? "bg-[#18181b] border border-[#3f3f46] text-white font-bold"
+                : "text-[#71717a] hover:text-[#d4d4d8]"
+            }`}
+          >
+            <Search class="w-3 h-3" />
+            <span>$ buscador_musica</span>
+          </button>
         </div>
-        <button
-          onclick={pasteClipboard}
-          class="flex items-center gap-1 text-[11px] text-[#a1a1aa] hover:text-white border-b border-transparent hover:border-[#a1a1aa] pb-0.5 transition-all cursor-pointer"
-        >
-          <Clipboard class="w-3 h-3" />
-          <span>pegar_clipboard</span>
-        </button>
+
+        {#if activeTab === "url"}
+          <button
+            onclick={pasteClipboard}
+            class="flex items-center gap-1 text-[11px] text-[#a1a1aa] hover:text-white border-b border-transparent hover:border-[#a1a1aa] pb-0.5 transition-all cursor-pointer"
+          >
+            <Clipboard class="w-3 h-3" />
+            <span>pegar_clipboard</span>
+          </button>
+        {:else}
+          <div class="flex items-center gap-1.5 text-[11px] text-[#71717a]">
+            <span>destino:</span>
+            <button
+              onclick={selectFolder}
+              class="text-[#a1a1aa] hover:text-white truncate max-w-[140px] sm:max-w-[200px] cursor-pointer"
+              title="Cambiar carpeta de destino"
+            >
+              {downloadFolder}
+            </button>
+          </div>
+        {/if}
       </div>
 
-      <div class="flex flex-col sm:flex-row gap-2">
-        <div class="relative flex-1">
-          <input
-            type="text"
-            placeholder="https://..."
-            bind:value={urlInput}
-            onkeydown={(e) => e.key === "Enter" && handleInspectUrl()}
-            class="w-full bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] focus:ring-1 focus:ring-[#71717a] rounded px-3.5 py-2.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none transition-colors"
-          />
-        </div>
-        <button
-          onclick={handleInspectUrl}
-          disabled={isLoadingInfo || !urlInput.trim()}
-          class="px-4 py-2.5 rounded bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] hover:border-white text-white font-mono text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-30 shrink-0"
-        >
-          {#if isLoadingInfo}
-            <Loader2 class="w-3.5 h-3.5 animate-spin" />
-            <span>analizando</span>
-          {:else}
-            <span>inspeccionar</span>
+      {#if activeTab === "url"}
+        <!-- URL Mode Content -->
+        <div class="space-y-3.5">
+          <div class="flex items-center justify-between text-[11px] text-[#71717a]">
+            <div class="flex items-center gap-1.5">
+              <span class="text-white font-bold">$</span>
+              <span>input_url --extract</span>
+            </div>
+            <span class="text-[10px] text-[#52525b]">YouTube, YT Music, Spotify, TikTok, Twitter...</span>
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-2">
+            <div class="relative flex-1">
+              <input
+                type="text"
+                placeholder="https://... o escribe canción para buscar"
+                bind:value={urlInput}
+                onkeydown={(e) => e.key === "Enter" && handleInspectUrl()}
+                class="w-full bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] focus:ring-1 focus:ring-[#71717a] rounded px-3.5 py-2.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none transition-colors"
+              />
+            </div>
+            <button
+              onclick={handleInspectUrl}
+              disabled={isLoadingInfo || !urlInput.trim()}
+              class="px-4 py-2.5 rounded bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] hover:border-white text-white font-mono text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-30 shrink-0"
+            >
+              {#if isLoadingInfo}
+                <Loader2 class="w-3.5 h-3.5 animate-spin" />
+                <span>analizando</span>
+              {:else if urlInput.trim() && !isHttpUrl(urlInput.trim())}
+                <Search class="w-3.5 h-3.5" />
+                <span>buscar música</span>
+              {:else}
+                <span>inspeccionar</span>
+              {/if}
+            </button>
+          </div>
+
+          <!-- Media Preview Card -->
+          {#if currentPreview}
+            <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+              {#if currentPreview.thumbnail}
+                <img
+                  src={currentPreview.thumbnail}
+                  alt="Thumbnail"
+                  class="w-full sm:w-28 h-20 object-cover rounded bg-black border border-[#27272a] grayscale hover:grayscale-0 transition-all duration-300"
+                />
+              {/if}
+              <div class="flex-1 min-w-0 space-y-1">
+                <div class="flex items-center gap-2">
+                  {#if currentPreview.is_playlist}
+                    <ListMusic class="w-3.5 h-3.5 text-white shrink-0" />
+                  {/if}
+                  <h2 class="text-xs font-bold text-white truncate" title={currentPreview.title}>
+                    {currentPreview.title}
+                  </h2>
+                </div>
+                <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[#71717a]">
+                  {#if currentPreview.is_playlist}
+                    <span class="text-white">[Playlist: {currentPreview.playlist_count || currentPreview.playlist_items?.length} items]</span>
+                  {/if}
+                  {#if currentPreview.uploader}
+                    <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
+                  {/if}
+                  {#if currentPreview.duration}
+                    <span>duración: <strong class="text-[#d4d4d8] font-normal">{formatDuration(currentPreview.duration)}</strong></span>
+                  {/if}
+                  {#if currentPreview.is_direct_image}
+                    <span class="text-white font-semibold">[imagen detectada]</span>
+                  {/if}
+                </div>
+              </div>
+            </div>
           {/if}
-        </button>
-      </div>
+
+          <!-- Controls -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+            <div class="flex bg-[#090a0f] p-0.5 rounded border border-[#27272a]">
+              <button
+                onclick={() => { selectedMode = "video"; selectedQuality = "best"; }}
+                class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
+                  selectedMode === "video" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
+                }`}
+              >
+                <Video class="w-3 h-3" />
+                <span>video</span>
+              </button>
+              <button
+                onclick={() => { selectedMode = "audio"; selectedQuality = "mp3"; }}
+                class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
+                  selectedMode === "audio" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
+                }`}
+              >
+                <Music class="w-3 h-3" />
+                <span>audio</span>
+              </button>
+              <button
+                onclick={() => { selectedMode = "image"; selectedQuality = "original"; }}
+                class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
+                  selectedMode === "image" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
+                }`}
+              >
+                <ImageIcon class="w-3 h-3" />
+                <span>foto</span>
+              </button>
+            </div>
+
+            <div class="relative flex items-center">
+              <select
+                bind:value={selectedQuality}
+                class="w-full h-full bg-[#090a0f]! text-white! border border-[#27272a] focus:border-[#71717a] rounded px-3 py-1.5 text-xs font-mono focus:outline-none appearance-none cursor-pointer"
+              >
+                {#if selectedMode === "video"}
+                  <option value="best" class="bg-[#10121a] text-white">Máxima Calidad (Original)</option>
+                  <option value="1080p" class="bg-[#10121a] text-white">1080p FHD</option>
+                  <option value="720p" class="bg-[#10121a] text-white">720p HD</option>
+                {:else if selectedMode === "audio"}
+                  <option value="mp3" class="bg-[#10121a] text-white">MP3 320kbps + ID3</option>
+                  <option value="m4a" class="bg-[#10121a] text-white">M4A (AAC)</option>
+                  <option value="flac" class="bg-[#10121a] text-white">FLAC Lossless</option>
+                {:else}
+                  <option value="original" class="bg-[#10121a] text-white">Imagen Alta Resolución</option>
+                {/if}
+              </select>
+              <div class="pointer-events-none absolute right-2.5 flex items-center text-[#71717a]">
+                <ChevronDown class="w-3.5 h-3.5" />
+              </div>
+            </div>
+
+            <button
+              onclick={selectFolder}
+              class="flex items-center justify-between bg-[#090a0f] border border-[#27272a] hover:border-[#71717a] px-3 py-1.5 rounded text-xs text-[#a1a1aa] hover:text-white transition-colors truncate cursor-pointer text-left"
+            >
+              <div class="flex items-center gap-1.5 truncate">
+                <HardDrive class="w-3 h-3 text-[#71717a] shrink-0" />
+                <span class="truncate">{downloadFolder}</span>
+              </div>
+              <span class="text-[10px] text-[#71717a] shrink-0 ml-1">dir</span>
+            </button>
+          </div>
+
+          <div class="pt-1">
+            <button
+              onclick={handleDownload}
+              disabled={!urlInput.trim()}
+              class="w-full py-2.5 rounded bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Download class="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
+            </button>
+          </div>
+        </div>
+      {:else}
+        <!-- Search Mode Content -->
+        <div class="space-y-3.5">
+          <div class="flex items-center justify-between text-[11px] text-[#71717a]">
+            <div class="flex items-center gap-1.5">
+              <span class="text-white font-bold">$</span>
+              <span>ytsearch --music --tags --navidrome</span>
+            </div>
+            <button
+              onclick={selectFolder}
+              class="flex items-center gap-1 text-[11px] text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+              title="Directorio de destino para descargas"
+            >
+              <Folder class="w-3 h-3 text-[#71717a]" />
+              <span class="truncate max-w-[160px]">{downloadFolder}</span>
+            </button>
+          </div>
+
+          <div class="flex flex-col sm:flex-row gap-2">
+            <div class="relative flex-1">
+              <input
+                type="text"
+                placeholder="Escribe canción, artista o álbum (ej: Loser Tame Impala)..."
+                bind:value={searchQuery}
+                onkeydown={handleSearchInputKeydown}
+                class="w-full bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] focus:ring-1 focus:ring-[#71717a] rounded px-3.5 py-2.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none transition-colors"
+              />
+            </div>
+            <button
+              onclick={handleSearch}
+              disabled={isSearching || !searchQuery.trim()}
+              class="px-4 py-2.5 rounded bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] text-black font-mono font-bold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-30 shrink-0"
+            >
+              {#if isSearching}
+                <Loader2 class="w-3.5 h-3.5 animate-spin text-black" />
+                <span>buscando</span>
+              {:else}
+                <Search class="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>buscar</span>
+              {/if}
+            </button>
+          </div>
+
+          <!-- Quick examples if no results -->
+          {#if searchResults.length === 0 && !isSearching && !errorMessage}
+            <div class="flex items-center flex-wrap gap-2 text-[11px] text-[#71717a] pt-0.5">
+              <span>ejemplos:</span>
+              <button
+                onclick={() => { searchQuery = "Loser Tame Impala"; handleSearch(); }}
+                class="text-[#a1a1aa] hover:text-white underline decoration-dotted cursor-pointer"
+              >
+                Loser Tame Impala
+              </button>
+              <span>•</span>
+              <button
+                onclick={() => { searchQuery = "Daft Punk Instant Crush"; handleSearch(); }}
+                class="text-[#a1a1aa] hover:text-white underline decoration-dotted cursor-pointer"
+              >
+                Instant Crush
+              </button>
+              <span>•</span>
+              <button
+                onclick={() => { searchQuery = "Crimen Gustavo Cerati"; handleSearch(); }}
+                class="text-[#a1a1aa] hover:text-white underline decoration-dotted cursor-pointer"
+              >
+                Crimen Cerati
+              </button>
+            </div>
+          {/if}
+
+          <!-- Search Results List -->
+          {#if searchResults.length > 0}
+            <div class="space-y-2 pt-1">
+              <div class="flex items-center justify-between text-xs text-[#71717a] border-b border-[#27272a] pb-1.5">
+                <span class="font-bold text-[#a1a1aa]">
+                  // resultados [{searchResults.length}] — 1-click descarga con carátula y tags ID3
+                </span>
+                <button
+                  onclick={() => searchResults = []}
+                  class="flex items-center gap-1 text-[11px] text-[#71717a] hover:text-white transition-colors cursor-pointer"
+                >
+                  <X class="w-3 h-3" />
+                  <span>cerrar</span>
+                </button>
+              </div>
+
+              <div class="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+                {#each searchResults as item (item.id)}
+                  <div class="p-2.5 bg-[#090a0f] hover:bg-[#141620] border border-[#27272a] hover:border-[#3f3f46] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between transition-colors">
+                    <div class="flex items-center gap-3 min-w-0 flex-1">
+                      {#if item.thumbnail}
+                        <img
+                          src={item.thumbnail}
+                          alt={item.title}
+                          class="w-16 h-12 object-cover rounded bg-black border border-[#27272a] shrink-0"
+                          loading="lazy"
+                        />
+                      {:else}
+                        <div class="w-16 h-12 rounded bg-[#18181b] border border-[#27272a] flex items-center justify-center shrink-0">
+                          <Music class="w-4 h-4 text-[#71717a]" />
+                        </div>
+                      {/if}
+                      <div class="min-w-0 flex-1 space-y-0.5">
+                        <p class="text-xs font-bold text-white truncate" title={item.title}>
+                          {item.title}
+                        </p>
+                        <div class="flex items-center gap-2 text-[11px] text-[#71717a]">
+                          {#if item.uploader}
+                            <span class="truncate max-w-[160px] sm:max-w-[220px] text-[#a1a1aa] font-medium">{item.uploader}</span>
+                          {/if}
+                          {#if item.duration}
+                            <span>• {formatDuration(item.duration)}</span>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                      <button
+                        onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "audio", "mp3")}
+                        class="flex items-center gap-1.5 text-[11px] bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] text-black font-bold px-2.5 py-1.5 rounded transition-colors cursor-pointer"
+                        title="Descargar MP3 con ID3 tags y carátula para Navidrome"
+                      >
+                        <Music class="w-3 h-3 stroke-[2.5]" />
+                        <span>MP3</span>
+                      </button>
+                      <button
+                        onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "video", "best")}
+                        class="flex items-center gap-1.5 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2.5 py-1.5 rounded transition-colors cursor-pointer"
+                        title="Descargar Video MP4"
+                      >
+                        <Video class="w-3 h-3" />
+                        <span>Video</span>
+                      </button>
+                      <button
+                        onclick={() => {
+                          activeTab = "url";
+                          urlInput = item.url;
+                          handleInspectUrl();
+                        }}
+                        class="text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] hover:border-[#3f3f46] text-[#71717a] hover:text-white p-1.5 rounded transition-colors cursor-pointer"
+                        title="Inspeccionar en panel principal"
+                      >
+                        <ExternalLink class="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
       {#if errorMessage}
         <div class="p-2.5 bg-[#1c1917] border border-[#44403c] rounded text-[#fca5a5] text-xs flex items-center gap-2">
@@ -342,120 +730,6 @@
           <span>{errorMessage}</span>
         </div>
       {/if}
-
-      <!-- Media Preview Card -->
-      {#if currentPreview}
-        <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-          {#if currentPreview.thumbnail}
-            <img
-              src={currentPreview.thumbnail}
-              alt="Thumbnail"
-              class="w-full sm:w-28 h-20 object-cover rounded bg-black border border-[#27272a] grayscale hover:grayscale-0 transition-all duration-300"
-            />
-          {/if}
-          <div class="flex-1 min-w-0 space-y-1">
-            <div class="flex items-center gap-2">
-              {#if currentPreview.is_playlist}
-                <ListMusic class="w-3.5 h-3.5 text-white shrink-0" />
-              {/if}
-              <h2 class="text-xs font-bold text-white truncate" title={currentPreview.title}>
-                {currentPreview.title}
-              </h2>
-            </div>
-            <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[#71717a]">
-              {#if currentPreview.is_playlist}
-                <span class="text-white">[Playlist: {currentPreview.playlist_count || currentPreview.playlist_items?.length} items]</span>
-              {/if}
-              {#if currentPreview.uploader}
-                <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
-              {/if}
-              {#if currentPreview.duration}
-                <span>duración: <strong class="text-[#d4d4d8] font-normal">{formatDuration(currentPreview.duration)}</strong></span>
-              {/if}
-              {#if currentPreview.is_direct_image}
-                <span class="text-white font-semibold">[imagen detectada]</span>
-              {/if}
-            </div>
-          </div>
-        </div>
-      {/if}
-
-      <!-- Controls -->
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
-        <div class="flex bg-[#090a0f] p-0.5 rounded border border-[#27272a]">
-          <button
-            onclick={() => { selectedMode = "video"; selectedQuality = "best"; }}
-            class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "video" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
-            }`}
-          >
-            <Video class="w-3 h-3" />
-            <span>video</span>
-          </button>
-          <button
-            onclick={() => { selectedMode = "audio"; selectedQuality = "mp3"; }}
-            class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "audio" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
-            }`}
-          >
-            <Music class="w-3 h-3" />
-            <span>audio</span>
-          </button>
-          <button
-            onclick={() => { selectedMode = "image"; selectedQuality = "original"; }}
-            class={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded transition-all cursor-pointer ${
-              selectedMode === "image" ? "bg-white text-black font-bold" : "text-[#71717a] hover:text-white"
-            }`}
-          >
-            <ImageIcon class="w-3 h-3" />
-            <span>foto</span>
-          </button>
-        </div>
-
-        <div class="relative flex items-center">
-          <select
-            bind:value={selectedQuality}
-            class="w-full h-full bg-[#090a0f]! text-white! border border-[#27272a] focus:border-[#71717a] rounded px-3 py-1.5 text-xs font-mono focus:outline-none appearance-none cursor-pointer"
-          >
-            {#if selectedMode === "video"}
-              <option value="best" class="bg-[#10121a] text-white">Máxima Calidad (Original)</option>
-              <option value="1080p" class="bg-[#10121a] text-white">1080p FHD</option>
-              <option value="720p" class="bg-[#10121a] text-white">720p HD</option>
-            {:else if selectedMode === "audio"}
-              <option value="mp3" class="bg-[#10121a] text-white">MP3 320kbps</option>
-              <option value="m4a" class="bg-[#10121a] text-white">M4A (AAC)</option>
-              <option value="flac" class="bg-[#10121a] text-white">FLAC Lossless</option>
-            {:else}
-              <option value="original" class="bg-[#10121a] text-white">Imagen Alta Resolución</option>
-            {/if}
-          </select>
-          <div class="pointer-events-none absolute right-2.5 flex items-center text-[#71717a]">
-            <ChevronDown class="w-3.5 h-3.5" />
-          </div>
-        </div>
-
-        <button
-          onclick={selectFolder}
-          class="flex items-center justify-between bg-[#090a0f] border border-[#27272a] hover:border-[#71717a] px-3 py-1.5 rounded text-xs text-[#a1a1aa] hover:text-white transition-colors truncate cursor-pointer text-left"
-        >
-          <div class="flex items-center gap-1.5 truncate">
-            <HardDrive class="w-3 h-3 text-[#71717a] shrink-0" />
-            <span class="truncate">{downloadFolder}</span>
-          </div>
-          <span class="text-[10px] text-[#71717a] shrink-0 ml-1">dir</span>
-        </button>
-      </div>
-
-      <div class="pt-1">
-        <button
-          onclick={handleDownload}
-          disabled={!urlInput.trim()}
-          class="w-full py-2.5 rounded bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-colors flex items-center justify-center gap-2 cursor-pointer"
-        >
-          <Download class="w-3.5 h-3.5 stroke-[2.5]" />
-          <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
-        </button>
-      </div>
     </div>
 
     <!-- Active Tasks & Persistent History -->
