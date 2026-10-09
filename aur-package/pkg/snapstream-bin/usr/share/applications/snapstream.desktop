@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SnapStream
+Comment=Descargador multimedia universal ligero
+Exec=snapstream
+Icon=snapstream
+Terminal=false
+Type=Application
+Categories=AudioVideo;Network;Utility;
+Keywords=youtube;instagram;facebook;downloader;video;audio;
+StartupNotify=true

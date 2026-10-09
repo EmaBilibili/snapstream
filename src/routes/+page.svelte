@@ -115,6 +115,9 @@
       currentPreview = data;
       if (data.is_direct_image) {
         selectedMode = "image";
+      } else if (urlInput.includes("music.youtube.com") || urlInput.includes("spotify") || urlInput.includes("soundcloud")) {
+        selectedMode = "audio";
+        selectedQuality = "mp3";
       }
     } catch (err: any) {
       errorMessage = err?.toString() || "Error al obtener información del enlace.";

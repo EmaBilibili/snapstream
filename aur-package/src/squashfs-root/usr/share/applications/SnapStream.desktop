@@ -1,0 +1,9 @@
+[Desktop Entry]
+Categories=
+Comment=A Tauri App
+Exec=snapstream
+StartupWMClass=snapstream
+Icon=snapstream
+Name=SnapStream
+Terminal=false
+Type=Application

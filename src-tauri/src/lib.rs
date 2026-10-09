@@ -36,6 +36,33 @@ pub struct DownloadProgress {
 }
 
 fn get_ytdlp_cmd() -> std::path::PathBuf {
+    // 1. Si existe en PATH del sistema
+    if let Ok(p) = which::which("yt-dlp") {
+        return p;
+    }
+
+    // 2. Comprobar ~/.local/bin/yt-dlp
+    if let Some(home) = std::env::var_os("HOME") {
+        let user_bin = std::path::PathBuf::from(home).join(".local/bin/yt-dlp");
+        if user_bin.exists() {
+            return user_bin;
+        }
+    }
+
+    // 3. Comprobar relativo al ejecutable de la aplicación
+    if let Ok(mut exe) = std::env::current_exe() {
+        exe.pop();
+        let sibling = exe.join("yt-dlp");
+        if sibling.exists() {
+            return sibling;
+        }
+        let in_bin = exe.join("binaries/yt-dlp");
+        if in_bin.exists() {
+            return in_bin;
+        }
+    }
+
+    // 4. En entorno de desarrollo
     let local = std::path::Path::new("binaries/yt-dlp");
     if local.exists() {
         return local.to_path_buf();
@@ -44,11 +71,18 @@ fn get_ytdlp_cmd() -> std::path::PathBuf {
     if local_src.exists() {
         return local_src.to_path_buf();
     }
+
     std::path::PathBuf::from("yt-dlp")
 }
 
 fn normalize_social_url(url: &str) -> String {
-    url.trim().to_string()
+    let clean = url.trim().to_string();
+    // YouTube Music comparte IDs idénticos con YouTube estándar,
+    // convertir music.youtube.com a www.youtube.com resuelve bloqueos y desvía listas automáticas de radio
+    if clean.contains("music.youtube.com") {
+        return clean.replace("music.youtube.com", "www.youtube.com");
+    }
+    clean
 }
 
 async fn extract_og_metadata(url: &str) -> Option<MediaMetadata> {
@@ -131,10 +165,15 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
                     if let Some(entries) = v["entries"].as_array() {
                         count = Some(entries.len());
                         for e in entries.iter().take(50) {
-                            let entry_url = e["url"]
-                                .as_str()
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| clean_url.clone());
+                            let entry_id = e["id"].as_str().unwrap_or("");
+                            let entry_url = if !entry_id.is_empty() {
+                                format!("https://www.youtube.com/watch?v={}", entry_id)
+                            } else {
+                                e["url"]
+                                    .as_str()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| clean_url.clone())
+                            };
                             let entry_title = e["title"].as_str().unwrap_or("Pista").to_string();
                             items.push(PlaylistItem {
                                 url: entry_url,
