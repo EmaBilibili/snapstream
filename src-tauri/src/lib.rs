@@ -228,62 +228,128 @@ async fn search_music(query: String) -> Result<Vec<SearchResult>, String> {
     }
 
     let ytdlp_path = get_ytdlp_cmd();
-    let search_arg = format!("ytsearch8:{}", clean_query);
+    let mut results = Vec::new();
 
-    let output = Command::new(&ytdlp_path)
+    // 1. Intentar primero búsqueda en YouTube Music (prioriza versiones oficiales de audio/estudio sin intros de video)
+    let yt_music_query = clean_query.replace(' ', "+");
+    let yt_music_url = format!("https://music.youtube.com/search?q={}", yt_music_query);
+
+    let output_ytm = Command::new(&ytdlp_path)
         .args([
-            &search_arg,
+            &yt_music_url,
             "--dump-json",
             "--flat-playlist",
             "--no-warnings",
             "--add-header",
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
         ])
-        .output()
-        .map_err(|e| format!("Error al ejecutar búsqueda: {}", e))?;
+        .output();
 
-    if !output.status.success() {
-        let err_str = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Fallo en la búsqueda: {}", err_str));
+    if let Ok(output) = output_ytm {
+        if output.status.success() {
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            for line in stdout_str.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    if v["ie_key"].as_str() != Some("Youtube") {
+                        continue;
+                    }
+                    let id = v["id"].as_str().unwrap_or("").to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let title = v["title"].as_str().unwrap_or("Sin título").to_string();
+                    let uploader = v["uploader"]
+                        .as_str()
+                        .or_else(|| v["channel"].as_str())
+                        .map(|s| s.to_string());
+                    let duration = v["duration"].as_f64();
+                    let thumbnail = v["thumbnail"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            v["thumbnails"].as_array().and_then(|arr| {
+                                arr.last().and_then(|t| t["url"].as_str().map(|s| s.to_string()))
+                            })
+                        })
+                        .or_else(|| Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", &id)));
+                    let url = format!("https://www.youtube.com/watch?v={}", &id);
+
+                    results.push(SearchResult {
+                        id,
+                        title,
+                        uploader,
+                        duration,
+                        thumbnail,
+                        url,
+                    });
+
+                    if results.len() >= 8 {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let mut results = Vec::new();
+    // 2. Si YouTube Music no devolvió resultados, fallback a búsqueda general ytsearch
+    if results.is_empty() {
+        let search_arg = format!("ytsearch8:{}", clean_query);
+        let output = Command::new(&ytdlp_path)
+            .args([
+                &search_arg,
+                "--dump-json",
+                "--flat-playlist",
+                "--no-warnings",
+                "--add-header",
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            ])
+            .output()
+            .map_err(|e| format!("Error al ejecutar búsqueda: {}", e))?;
 
-    for line in stdout_str.lines() {
-        if line.trim().is_empty() {
-            continue;
+        if !output.status.success() {
+            let err_str = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Fallo en la búsqueda: {}", err_str));
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            let id = v["id"].as_str().unwrap_or("").to_string();
-            if id.is_empty() {
+
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        for line in stdout_str.lines() {
+            if line.trim().is_empty() {
                 continue;
             }
-            let title = v["title"].as_str().unwrap_or("Sin título").to_string();
-            let uploader = v["uploader"]
-                .as_str()
-                .or_else(|| v["channel"].as_str())
-                .map(|s| s.to_string());
-            let duration = v["duration"].as_f64();
-            let thumbnail = v["thumbnail"]
-                .as_str()
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    v["thumbnails"].as_array().and_then(|arr| {
-                        arr.last().and_then(|t| t["url"].as_str().map(|s| s.to_string()))
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let id = v["id"].as_str().unwrap_or("").to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let title = v["title"].as_str().unwrap_or("Sin título").to_string();
+                let uploader = v["uploader"]
+                    .as_str()
+                    .or_else(|| v["channel"].as_str())
+                    .map(|s| s.to_string());
+                let duration = v["duration"].as_f64();
+                let thumbnail = v["thumbnail"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        v["thumbnails"].as_array().and_then(|arr| {
+                            arr.last().and_then(|t| t["url"].as_str().map(|s| s.to_string()))
+                        })
                     })
-                })
-                .or_else(|| Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", &id)));
-            let url = format!("https://www.youtube.com/watch?v={}", &id);
+                    .or_else(|| Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", &id)));
+                let url = format!("https://www.youtube.com/watch?v={}", &id);
 
-            results.push(SearchResult {
-                id,
-                title,
-                uploader,
-                duration,
-                thumbnail,
-                url,
-            });
+                results.push(SearchResult {
+                    id,
+                    title,
+                    uploader,
+                    duration,
+                    thumbnail,
+                    url,
+                });
+            }
         }
     }
 
@@ -437,6 +503,8 @@ async fn start_download(
                 if quality.is_empty() { "mp3" } else { &quality },
                 "--embed-metadata",
                 "--embed-thumbnail",
+                "--sponsorblock-remove",
+                "music_offtopic",
                 "--parse-metadata",
                 "%(uploader,channel)s:%(artist)s",
                 "--parse-metadata",
