@@ -351,6 +351,8 @@ async fn start_download(
                 "-x",
                 "--audio-format",
                 if quality.is_empty() { "mp3" } else { &quality },
+                "--embed-metadata",
+                "--embed-thumbnail",
             ]);
         } else {
             match quality.as_str() {
