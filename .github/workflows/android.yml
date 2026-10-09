@@ -1,0 +1,145 @@
+name: "Build Android APK"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Tipo de compilación"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+  push:
+    tags:
+      - "v*"
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: "Compilar APK (arm64-v8a)"
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 17 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Configurar Android NDK
+        run: |
+          NDK_VERSION="26.3.11579264"
+          if [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            echo "NDK $NDK_VERSION ya está instalado."
+          else
+            echo "Instalando NDK $NDK_VERSION..."
+            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;$NDK_VERSION" || sdkmanager --install "ndk;$NDK_VERSION"
+          fi
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
+
+      - name: Configurar Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Configurar Rust Toolchain y Target Android
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cachear cargo-ndk
+        uses: actions/cache@v4
+        id: cache-cargo-ndk
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: ${{ runner.os }}-cargo-ndk-v1
+
+      - name: Instalar cargo-ndk
+        if: steps.cache-cargo-ndk.outputs.cache-hit != 'true'
+        run: cargo install cargo-ndk
+
+      - name: Instalar dependencias npm
+        run: npm ci
+
+      - name: Compilar frontend
+        run: npm run build
+
+      - name: Inicializar proyecto Android (Tauri v2)
+        run: |
+          if [ ! -d "src-tauri/gen/android" ]; then
+            echo "Inicializando entorno Android de Tauri..."
+            npx tauri android init --ci
+          fi
+
+      - name: Compilar APK Android
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          echo "Compilando en modo: $BUILD_TYPE"
+          if [ "$BUILD_TYPE" = "debug" ]; then
+            npx tauri android build --apk --target aarch64 --debug --ci
+          else
+            npx tauri android build --apk --target aarch64 --ci
+          fi
+
+      - name: Firmar APK para instalación directa
+        run: |
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          echo "Usando build tools en: $BUILD_TOOLS"
+          
+          # Generar keystore de firma para release
+          keytool -genkey -v -keystore snapstream-signer.keystore \
+            -alias snapstream -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass snapstream123 -keypass snapstream123 \
+            -dname "CN=SnapStream, OU=EmaBilibili, O=SnapStream, L=BA, S=BA, C=AR"
+
+          mkdir -p dist-apk
+          
+          for apk in $(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk"); do
+            echo "Analizando APK: $apk"
+            if [[ "$apk" == *"unsigned"* ]]; then
+              signed_apk="dist-apk/SnapStream-arm64-v8a-release.apk"
+              $BUILD_TOOLS/apksigner sign --ks snapstream-signer.keystore \
+                --ks-pass pass:snapstream123 --key-pass pass:snapstream123 \
+                --out "$signed_apk" "$apk"
+              echo "✓ APK firmado con éxito: $signed_apk"
+            else
+              filename=$(basename "$apk")
+              cp "$apk" "dist-apk/SnapStream-${filename}"
+              echo "✓ APK copiado: dist-apk/SnapStream-${filename}"
+            fi
+          done
+
+          echo "Archivos APK generados:"
+          ls -lh dist-apk/
+
+      - name: Subir APK como Artefacto de GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnapStream-Android-APK
+          path: dist-apk/*.apk
+          retention-days: 14
+
+      - name: Publicar APK en Release de GitHub (si es tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-apk/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
