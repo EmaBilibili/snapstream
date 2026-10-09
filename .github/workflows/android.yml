@@ -38,20 +38,30 @@ jobs:
           distribution: "zulu"
           java-version: "17"
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configurar variables Android SDK
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "/usr/local/lib/android/sdk/platform-tools" >> $GITHUB_PATH
+          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
+      - name: Aceptar licencias de Android SDK
+        run: |
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Configurar Android NDK
         run: |
-          NDK_VERSION="26.3.11579264"
-          if [ -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
-            echo "NDK $NDK_VERSION ya está instalado."
+          NDK_DIR=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -n 1)
+          if [ -n "$NDK_DIR" ] && [ -d "$NDK_DIR" ]; then
+            echo "Usando NDK preinstalado en: $NDK_DIR"
+            echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+            echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
           else
-            echo "Instalando NDK $NDK_VERSION..."
-            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;$NDK_VERSION" || sdkmanager --install "ndk;$NDK_VERSION"
+            echo "Instalando NDK 26.3.11579264..."
+            yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --install "ndk;26.3.11579264"
+            echo "NDK_HOME=/usr/local/lib/android/sdk/ndk/26.3.11579264" >> $GITHUB_ENV
+            echo "ANDROID_NDK_ROOT=/usr/local/lib/android/sdk/ndk/26.3.11579264" >> $GITHUB_ENV
           fi
-          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> $GITHUB_ENV
 
       - name: Configurar Node.js 20
         uses: actions/setup-node@v4
@@ -100,10 +110,9 @@ jobs:
 
       - name: Firmar APK para instalación directa
         run: |
-          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          BUILD_TOOLS=$(ls -d /usr/local/lib/android/sdk/build-tools/* | sort -V | tail -n 1)
           echo "Usando build tools en: $BUILD_TOOLS"
           
-          # Generar keystore de firma para release
           keytool -genkey -v -keystore snapstream-signer.keystore \
             -alias snapstream -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass snapstream123 -keypass snapstream123 \
