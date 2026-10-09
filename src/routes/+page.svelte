@@ -82,6 +82,20 @@
   let downloads = $state<DownloadItem[]>([]);
   let updateStatus = $state<string | null>(null);
   let isCheckingUpdate = $state(false);
+  let toastMessage = $state<string | null>(null);
+  let toastTimeout: any = null;
+
+  function showToast(msg: string) {
+    toastMessage = msg;
+    if (toastTimeout) clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => {
+      toastMessage = null;
+    }, 3500);
+  }
+
+  function getDownloadState(url: string, mode: "audio" | "video") {
+    return downloads.find((d) => d.url === url && d.mode === mode);
+  }
 
   // Cargar historial persistente de LocalStorage
   function loadHistory() {
@@ -257,6 +271,8 @@
 
     downloads = [newItem, ...downloads];
     saveHistory();
+    const shortTitle = title.length > 38 ? title.substring(0, 38) + "..." : title;
+    showToast(`Iniciando descarga: ${shortTitle} [${mode.toUpperCase()}]`);
 
     try {
       await invoke("start_download", {
@@ -273,6 +289,7 @@
         itm.status = "error";
         itm.errorMsg = err?.toString();
         saveHistory();
+        showToast(`✗ Error: ${err?.toString() || "fallo al iniciar descarga"}`);
       }
     }
   }
@@ -321,8 +338,13 @@
         if (payload.filename) {
           item.errorMsg = payload.filename;
         }
-        if (payload.status === "finished" || payload.status === "error") {
+        if (payload.status === "finished") {
           saveHistory();
+          const shortTitle = item.title.length > 35 ? item.title.substring(0, 35) + "..." : item.title;
+          showToast(`✓ Descarga completada: ${shortTitle}`);
+        } else if (payload.status === "error") {
+          saveHistory();
+          showToast(`✗ Error al descargar: ${item.title}`);
         }
       }
     });
@@ -656,9 +678,15 @@
                 </button>
               </div>
 
-              <div class="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+              <div class="space-y-1.5 max-h-[400px] overflow-y-auto pr-1">
                 {#each searchResults as item (item.id)}
-                  <div class="p-2.5 bg-[#090a0f] hover:bg-[#141620] border border-[#27272a] hover:border-[#3f3f46] rounded flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between transition-colors">
+                  {@const dlAudio = getDownloadState(item.url, "audio")}
+                  {@const dlVideo = getDownloadState(item.url, "video")}
+                  {@const activeDl = (dlAudio && (dlAudio.status === "downloading" || dlAudio.status === "processing" || dlAudio.status === "queued")) ? dlAudio : ((dlVideo && (dlVideo.status === "downloading" || dlVideo.status === "processing" || dlVideo.status === "queued")) ? dlVideo : null)}
+                  <div class={`p-2.5 bg-[#090a0f] hover:bg-[#141620] border rounded flex flex-col gap-2 transition-all ${
+                    activeDl ? "border-[#52525b] shadow-sm shadow-white/5" : "border-[#27272a] hover:border-[#3f3f46]"
+                  }`}>
+                    <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between w-full">
                     <div class="flex items-center gap-3 min-w-0 flex-1">
                       {#if item.thumbnail}
                         <img
@@ -688,22 +716,99 @@
                     </div>
 
                     <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                      <button
-                        onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "audio", "mp3")}
-                        class="flex items-center gap-1.5 text-[11px] bg-white hover:bg-[#e4e4e7] active:bg-[#d4d4d8] text-black font-bold px-2.5 py-1.5 rounded transition-colors cursor-pointer"
-                        title="Descargar MP3 con ID3 tags y carátula para Navidrome"
-                      >
-                        <Music class="w-3 h-3 stroke-[2.5]" />
-                        <span>MP3</span>
-                      </button>
-                      <button
-                        onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "video", "best")}
-                        class="flex items-center gap-1.5 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2.5 py-1.5 rounded transition-colors cursor-pointer"
-                        title="Descargar Video MP4"
-                      >
-                        <Video class="w-3 h-3" />
-                        <span>Video</span>
-                      </button>
+                      <!-- MP3 Button -->
+                      {#if dlAudio}
+                        {#if dlAudio.status === "downloading"}
+                          <div class="flex items-center gap-1.5 text-[11px] bg-white text-black font-bold px-2.5 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-black" />
+                            <span>{dlAudio.percent.toFixed(0)}%</span>
+                          </div>
+                        {:else if dlAudio.status === "processing"}
+                          <div class="flex items-center gap-1.5 text-[11px] bg-white text-black font-bold px-2.5 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-black" />
+                            <span>tags ID3</span>
+                          </div>
+                        {:else if dlAudio.status === "finished"}
+                          <button
+                            onclick={() => openInFolder(dlAudio)}
+                            class="flex items-center gap-1 text-[11px] bg-white hover:bg-[#e4e4e7] text-black font-bold px-2.5 py-1.5 rounded transition-all cursor-pointer"
+                            title="MP3 descargado. Clic para abrir en carpeta."
+                          >
+                            <Check class="w-3 h-3 stroke-[3]" />
+                            <span>¡Listo!</span>
+                          </button>
+                        {:else if dlAudio.status === "queued"}
+                          <div class="flex items-center gap-1.5 text-[11px] bg-[#27272a] text-[#d4d4d8] px-2.5 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-white" />
+                            <span>en cola</span>
+                          </div>
+                        {:else if dlAudio.status === "error"}
+                          <button
+                            onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "audio", "mp3")}
+                            class="flex items-center gap-1 text-[11px] bg-red-950 border border-red-800 text-red-200 px-2 py-1 rounded cursor-pointer"
+                            title={dlAudio.errorMsg || "Error al descargar"}
+                          >
+                            <AlertTriangle class="w-3 h-3" />
+                            <span>reintentar</span>
+                          </button>
+                        {/if}
+                      {:else}
+                        <button
+                          onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "audio", "mp3")}
+                          class="flex items-center gap-1.5 text-[11px] bg-white hover:bg-[#e4e4e7] active:scale-95 text-black font-bold px-2.5 py-1.5 rounded transition-all cursor-pointer"
+                          title="Descargar MP3 con ID3 tags y carátula para Navidrome"
+                        >
+                          <Music class="w-3 h-3 stroke-[2.5]" />
+                          <span>MP3</span>
+                        </button>
+                      {/if}
+
+                      <!-- Video Button -->
+                      {#if dlVideo}
+                        {#if dlVideo.status === "downloading"}
+                          <div class="flex items-center gap-1 text-[11px] bg-[#18181b] border border-[#3f3f46] text-white px-2 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-white" />
+                            <span>{dlVideo.percent.toFixed(0)}%</span>
+                          </div>
+                        {:else if dlVideo.status === "processing"}
+                          <div class="flex items-center gap-1 text-[11px] bg-[#18181b] border border-[#3f3f46] text-white px-2 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-white" />
+                            <span>remux</span>
+                          </div>
+                        {:else if dlVideo.status === "finished"}
+                          <button
+                            onclick={() => openInFolder(dlVideo)}
+                            class="flex items-center gap-1 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-white px-2 py-1.5 rounded cursor-pointer"
+                            title="Video descargado. Clic para abrir"
+                          >
+                            <Check class="w-3 h-3 stroke-[3]" />
+                            <span>Listo</span>
+                          </button>
+                        {:else if dlVideo.status === "queued"}
+                          <div class="flex items-center gap-1 text-[11px] bg-[#18181b] border border-[#3f3f46] text-[#a1a1aa] px-2 py-1.5 rounded font-mono">
+                            <Loader2 class="w-3 h-3 animate-spin text-white" />
+                            <span>cola</span>
+                          </div>
+                        {:else if dlVideo.status === "error"}
+                          <button
+                            onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "video", "best")}
+                            class="flex items-center gap-1 text-[11px] bg-red-950 border border-red-800 text-red-200 px-2 py-1 rounded cursor-pointer"
+                          >
+                            <AlertTriangle class="w-3 h-3" />
+                            <span>reintentar</span>
+                          </button>
+                        {/if}
+                      {:else}
+                        <button
+                          onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "video", "best")}
+                          class="flex items-center gap-1.5 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2.5 py-1.5 rounded transition-all cursor-pointer active:scale-95"
+                          title="Descargar Video MP4"
+                        >
+                          <Video class="w-3 h-3" />
+                          <span>Video</span>
+                        </button>
+                      {/if}
+
                       <button
                         onclick={() => {
                           activeTab = "url";
@@ -711,13 +816,36 @@
                           handleInspectUrl();
                         }}
                         class="text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] hover:border-[#3f3f46] text-[#71717a] hover:text-white p-1.5 rounded transition-colors cursor-pointer"
-                        title="Inspeccionar en panel principal"
+                        title="Inspeccionar enlace"
                       >
                         <ExternalLink class="w-3 h-3" />
                       </button>
                     </div>
                   </div>
-                {/each}
+
+                  <!-- Mini progress bar inside card -->
+                  {#if activeDl && (activeDl.status === "downloading" || activeDl.status === "processing" || activeDl.status === "queued")}
+                    <div class="w-full pt-1 px-1">
+                      <div class="flex items-center justify-between text-[10px] text-[#a1a1aa] mb-1 font-mono">
+                        <span>
+                          {activeDl.status === "processing"
+                            ? (activeDl.mode === "audio" ? "incrustando carátula y tags ID3..." : "procesando...")
+                            : activeDl.status === "queued"
+                            ? "en cola..."
+                            : `descargando: ${activeDl.percent.toFixed(0)}%`}
+                        </span>
+                        <span>{activeDl.speed ? `${activeDl.speed} ` : ""}{activeDl.eta ? `• ETA: ${activeDl.eta}` : ""}</span>
+                      </div>
+                      <div class="w-full bg-[#18181b] border border-[#27272a] rounded-full h-1 overflow-hidden">
+                        <div
+                          class="bg-white h-full transition-all duration-300"
+                          style="width: {activeDl.status === 'processing' ? '99%' : `${activeDl.percent}%`}"
+                        ></div>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {/each}
               </div>
             </div>
           {/if}
@@ -824,6 +952,13 @@
         </div>
       {/if}
     </div>
+
+    {#if toastMessage}
+      <div class="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 bg-[#18181b] border border-[#3f3f46] text-white px-3.5 py-2.5 rounded shadow-2xl text-xs font-mono">
+        <Activity class="w-3.5 h-3.5 text-white animate-pulse shrink-0" />
+        <span class="max-w-[340px] truncate">{toastMessage}</span>
+      </div>
+    {/if}
 
   </div>
 </div>
