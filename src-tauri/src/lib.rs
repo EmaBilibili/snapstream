@@ -771,49 +771,85 @@ fn get_server_info() -> ServerInfo {
     }
 }
 
-#[tauri::command]
-async fn ping_remote_server(pc_ip: String) -> Result<serde_json::Value, String> {
-    let clean_ip = pc_ip.trim().trim_start_matches("http://").trim_start_matches("https://");
-    let target = if clean_ip.contains(':') {
-        format!("http://{}/api/ping", clean_ip)
+fn resolve_target_url(raw: &str, endpoint: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let endpoint_clean = endpoint.trim_start_matches('/');
+
+    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        let (proto, rest) = if let Some(stripped) = trimmed.strip_prefix("https://") {
+            ("https://", stripped)
+        } else {
+            ("http://", trimmed.strip_prefix("http://").unwrap())
+        };
+
+        if rest.contains(':') || rest.contains('/') || proto == "https://" {
+            format!("{}{}/{}", proto, rest, endpoint_clean)
+        } else {
+            format!("{}{}:48792/{}", proto, rest, endpoint_clean)
+        }
     } else {
-        format!("http://{}:48792/api/ping", clean_ip)
-    };
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let resp = client.get(&target).send().await.map_err(|e| format!("No se pudo conectar a la PC ({}): {}", target, e))?;
-    let data = resp.json::<serde_json::Value>().await.map_err(|e| format!("Respuesta no válida: {}", e))?;
-    Ok(data)
+        if trimmed.contains(':') || trimmed.contains('/') {
+            format!("http://{}/{}", trimmed, endpoint_clean)
+        } else if trimmed.contains("trycloudflare.com")
+            || trimmed.ends_with(".net")
+            || trimmed.ends_with(".com")
+            || trimmed.ends_with(".org")
+            || trimmed.ends_with(".app")
+        {
+            format!("https://{}/{}", trimmed, endpoint_clean)
+        } else {
+            format!("http://{}:48792/{}", trimmed, endpoint_clean)
+        }
+    }
 }
 
 #[tauri::command]
-async fn send_remote_download(pc_ip: String, item: RemoteDownloadPayload) -> Result<String, String> {
-    let clean_ip = pc_ip.trim().trim_start_matches("http://").trim_start_matches("https://");
-    let target = if clean_ip.contains(':') {
-        format!("http://{}/api/download", clean_ip)
-    } else {
-        format!("http://{}:48792/api/download", clean_ip)
-    };
+async fn ping_remote_server(pc_ip: String) -> Result<serde_json::Value, String> {
+    let target = resolve_target_url(&pc_ip, "api/ping");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client.post(&target)
+    let resp = client
+        .get(&target)
+        .send()
+        .await
+        .map_err(|e| format!("No se pudo conectar a la PC ({}): {}", target, e))?;
+    let data = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Respuesta no válida: {}", e))?;
+    Ok(data)
+}
+
+#[tauri::command]
+async fn send_remote_download(
+    pc_ip: String,
+    item: RemoteDownloadPayload,
+) -> Result<String, String> {
+    let target = resolve_target_url(&pc_ip, "api/download");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .post(&target)
         .json(&item)
         .send()
         .await
         .map_err(|e| format!("Error enviando orden a la PC: {}", e))?;
 
     if resp.status().is_success() {
-        Ok(format!("Descarga enviada a {}", clean_ip))
+        Ok(format!("Descarga enviada a {}", target))
     } else {
-        let err_text = resp.text().await.unwrap_or_else(|_| "Error desconocido".into());
+        let err_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Error desconocido".into());
         Err(format!("PC respondió con error: {}", err_text))
     }
 }

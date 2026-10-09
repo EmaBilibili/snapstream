@@ -133,23 +133,23 @@
   async function testRemoteConnection(ipToTest?: string) {
     const rawIp = (ipToTest || remotePcIp).trim();
     if (!rawIp) {
-      showToast("⚠️ Ingresa una dirección IP primero");
+      showToast("⚠️ Ingresa una dirección IP o dominio primero");
       return false;
     }
-    const cleanIp = rawIp.replace(/^https?:\/\//i, "").replace(/:[0-9]+$/, "");
+    const cleanTarget = rawIp.replace(/\/+$/, "");
     isTestingRemote = true;
     try {
-      const res = await invoke<any>("ping_remote_server", { pcIp: cleanIp });
+      const res = await invoke<any>("ping_remote_server", { pcIp: cleanTarget });
       remoteConnected = true;
-      remotePcIp = cleanIp;
+      remotePcIp = cleanTarget;
       try {
-        localStorage.setItem("snapstream_remote_ip", cleanIp);
+        localStorage.setItem("snapstream_remote_ip", cleanTarget);
       } catch (_) {}
-      showToast(`✓ Conectado a PC (${cleanIp}): SnapStream v${res.version || "0.1.0"}`);
+      showToast(`✓ Conectado a PC (${cleanTarget}): SnapStream v${res.version || "0.1.0"}`);
       return true;
     } catch (err: any) {
       remoteConnected = false;
-      showToast(`✗ Error conectando a ${cleanIp}: verifica que SnapStream esté abierto en tu PC`);
+      showToast(`✗ Error conectando a ${cleanTarget}`);
       return false;
     } finally {
       isTestingRemote = false;
@@ -175,11 +175,11 @@
   ) {
     if (!remotePcIp.trim()) {
       showRemoteModal = true;
-      showToast("⚠️ Ingresa la IP de tu PC para enviar");
+      showToast("⚠️ Ingresa la IP o dominio de tu PC para enviar");
       return;
     }
 
-    const cleanIp = remotePcIp.trim().replace(/^https?:\/\//i, "").replace(/:[0-9]+$/, "");
+    const cleanTarget = remotePcIp.trim().replace(/\/+$/, "");
     isSendingRemote = true;
     const id = "remote_" + Date.now().toString() + Math.random().toString(36).substring(2, 5);
 
@@ -199,7 +199,7 @@
 
     try {
       await invoke("send_remote_download", {
-        pcIp: cleanIp,
+        pcIp: cleanTarget,
         item: {
           url,
           title,
@@ -1343,11 +1343,11 @@
           </p>
 
           <div class="space-y-1.5">
-            <span class="text-[11px] text-[#71717a] font-medium block">IP de la PC en tu red local:</span>
+            <span class="text-[11px] text-[#71717a] font-medium block">IP de la PC o dominio remoto:</span>
             <div class="flex gap-2">
               <input
                 type="text"
-                placeholder="Ej: 192.168.1.69"
+                placeholder="192.168.1.69, Tailscale IP o https://tudominio.com"
                 bind:value={remotePcIp}
                 onkeydown={(e) => e.key === "Enter" && testRemoteConnection()}
                 class="flex-1 bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] rounded-lg px-3 py-2 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none"
