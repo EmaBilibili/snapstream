@@ -418,7 +418,11 @@ async fn start_download(
     let ytdlp_path = get_ytdlp_cmd();
     std::thread::spawn(move || {
         let mut cmd = Command::new(&ytdlp_path);
-        let output_template = format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'));
+        let output_template = if mode == "audio" {
+            format!("{}/%(artist,uploader)s - %(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
+        } else {
+            format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
+        };
 
         cmd.args(["--newline", "-o", &output_template]);
         cmd.args([
@@ -433,6 +437,16 @@ async fn start_download(
                 if quality.is_empty() { "mp3" } else { &quality },
                 "--embed-metadata",
                 "--embed-thumbnail",
+                "--parse-metadata",
+                "%(uploader,channel)s:%(artist)s",
+                "--parse-metadata",
+                "%(title)s:%(artist)s - %(title)s",
+                "--replace-in-metadata",
+                "title",
+                r"(?i)\s*[\(\[](official\s*(video|audio|music\s*video|lyric\s*video)|video\s*oficial|audio\s*oficial|lyrics?|remastered|video|audio|4k|hd)[\)\]]",
+                "",
+                "--parse-metadata",
+                "%(album,title)s:%(album)s",
             ]);
         } else {
             match quality.as_str() {
