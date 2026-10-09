@@ -24,7 +24,13 @@
     Trash2,
     Search,
     X,
-    ExternalLink
+    ExternalLink,
+    Monitor,
+    Smartphone,
+    Wifi,
+    Radio,
+    Server,
+    Copy
   } from "lucide-svelte";
 
   interface PlaylistItem {
@@ -97,6 +103,127 @@
     return downloads.find((d) => d.url === url && d.mode === mode);
   }
 
+  interface ServerInfo {
+    ip: string;
+    port: number;
+    url: string;
+    is_running: boolean;
+  }
+
+  let serverInfo = $state<ServerInfo | null>(null);
+  let downloadTarget = $state<"local" | "remote">("local");
+  let remotePcIp = $state("");
+  let remoteConnected = $state<boolean | null>(null);
+  let isTestingRemote = $state(false);
+  let showRemoteModal = $state(false);
+  let showServerInfoModal = $state(false);
+  let copiedServerIp = $state(false);
+  let isSendingRemote = $state(false);
+
+  function setDownloadTarget(target: "local" | "remote") {
+    downloadTarget = target;
+    try {
+      localStorage.setItem("snapstream_download_target", target);
+    } catch (_) {}
+    if (target === "remote" && !remotePcIp.trim()) {
+      showRemoteModal = true;
+    }
+  }
+
+  async function testRemoteConnection(ipToTest?: string) {
+    const rawIp = (ipToTest || remotePcIp).trim();
+    if (!rawIp) {
+      showToast("⚠️ Ingresa una dirección IP primero");
+      return false;
+    }
+    const cleanIp = rawIp.replace(/^https?:\/\//i, "").replace(/:[0-9]+$/, "");
+    isTestingRemote = true;
+    try {
+      const res = await invoke<any>("ping_remote_server", { pcIp: cleanIp });
+      remoteConnected = true;
+      remotePcIp = cleanIp;
+      try {
+        localStorage.setItem("snapstream_remote_ip", cleanIp);
+      } catch (_) {}
+      showToast(`✓ Conectado a PC (${cleanIp}): SnapStream v${res.version || "0.1.0"}`);
+      return true;
+    } catch (err: any) {
+      remoteConnected = false;
+      showToast(`✗ Error conectando a ${cleanIp}: verifica que SnapStream esté abierto en tu PC`);
+      return false;
+    } finally {
+      isTestingRemote = false;
+    }
+  }
+
+  async function copyServerIpToClipboard() {
+    if (!serverInfo?.ip) return;
+    try {
+      await navigator.clipboard.writeText(serverInfo.ip);
+      copiedServerIp = true;
+      showToast(`✓ IP copiada al portapapeles: ${serverInfo.ip}`);
+      setTimeout(() => (copiedServerIp = false), 2500);
+    } catch (_) {}
+  }
+
+  async function sendRemoteDownload(
+    url: string,
+    title: string,
+    mode: "video" | "audio" | "image",
+    quality: string,
+    thumbnail: string | null
+  ) {
+    if (!remotePcIp.trim()) {
+      showRemoteModal = true;
+      showToast("⚠️ Ingresa la IP de tu PC para enviar");
+      return;
+    }
+
+    const cleanIp = remotePcIp.trim().replace(/^https?:\/\//i, "").replace(/:[0-9]+$/, "");
+    isSendingRemote = true;
+    const id = "remote_" + Date.now().toString() + Math.random().toString(36).substring(2, 5);
+
+    const newItem: DownloadItem = {
+      id,
+      url,
+      title: `[🖥️ PC] ${title}`,
+      thumbnail,
+      mode,
+      quality,
+      percent: 100,
+      speed: "LAN",
+      eta: "OK",
+      status: "finished",
+      outputPath: "~/navidrome/music"
+    };
+
+    try {
+      await invoke("send_remote_download", {
+        pcIp: cleanIp,
+        item: {
+          url,
+          title,
+          mode,
+          quality,
+          thumbnail
+        }
+      });
+
+      downloads = [newItem, ...downloads];
+      saveHistory();
+      const shortTitle = title.length > 32 ? title.substring(0, 32) + "..." : title;
+      showToast(`✓ Enviado a PC: "${shortTitle}" → Navidrome`);
+    } catch (err: any) {
+      newItem.status = "error";
+      newItem.errorMsg = err?.toString();
+      downloads = [newItem, ...downloads];
+      saveHistory();
+      showToast(`✗ Error enviando a PC: ${err?.toString()}`);
+    } finally {
+      isSendingRemote = false;
+    }
+  }
+
   // Cargar historial persistente de LocalStorage
   function loadHistory() {
     try {
@@ -109,6 +236,14 @@
         downloadFolder = savedDir;
       } else if (typeof window !== "undefined" && navigator.userAgent.toLowerCase().includes("android")) {
         downloadFolder = "/storage/emulated/0/Download";
+      }
+      const savedTarget = localStorage.getItem("snapstream_download_target");
+      if (savedTarget === "remote" || savedTarget === "local") {
+        downloadTarget = savedTarget;
+      }
+      const savedIp = localStorage.getItem("snapstream_remote_ip");
+      if (savedIp) {
+        remotePcIp = savedIp;
       }
     } catch (_) {}
   }
@@ -233,6 +368,22 @@
   async function handleDownload() {
     if (!urlInput.trim()) return;
 
+    if (downloadTarget === "remote") {
+      if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
+        const items = currentPreview.playlist_items;
+        showToast(`Enviando playlist (${items.length} canciones) a PC...`);
+        for (const item of items) {
+          await sendRemoteDownload(item.url, item.title, "audio", "mp3", currentPreview.thumbnail);
+        }
+        return;
+      }
+
+      const title = currentPreview?.title || "recurso_multimedia";
+      const thumb = currentPreview?.thumbnail || null;
+      await sendRemoteDownload(urlInput.trim(), title, selectedMode, selectedQuality, thumb);
+      return;
+    }
+
     // Si es una playlist, descargar todos los elementos detectados
     if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
       const items = currentPreview.playlist_items;
@@ -245,6 +396,15 @@
     const title = currentPreview?.title || "recurso_multimedia";
     const thumb = currentPreview?.thumbnail || null;
     triggerSingleDownload(urlInput.trim(), title, thumb);
+  }
+
+  function handleSearchDownload(item: SearchResult, mode: "audio" | "video") {
+    const quality = mode === "audio" ? "mp3" : "best";
+    if (downloadTarget === "remote") {
+      sendRemoteDownload(item.url, item.title, mode, quality, item.thumbnail);
+    } else {
+      triggerSingleDownload(item.url, item.title, item.thumbnail, mode, quality);
+    }
   }
 
   async function triggerSingleDownload(
@@ -326,6 +486,22 @@
   onMount(() => {
     loadHistory();
 
+    invoke<ServerInfo>("get_server_info")
+      .then((info) => {
+        serverInfo = info;
+      })
+      .catch(() => {});
+
+    if (remotePcIp) {
+      invoke<any>("ping_remote_server", { pcIp: remotePcIp })
+        .then(() => {
+          remoteConnected = true;
+        })
+        .catch(() => {
+          remoteConnected = false;
+        });
+    }
+
     const unlisten = listen<any>("download-progress", (event) => {
       const payload = event.payload;
       const item = downloads.find((d) => d.id === payload.id);
@@ -373,6 +549,18 @@
       </div>
 
       <div class="flex items-center gap-2 shrink-0">
+        {#if serverInfo?.is_running}
+          <button
+            onclick={() => showServerInfoModal = true}
+            class="flex items-center gap-1.5 text-xs bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] hover:border-emerald-500/50 text-[#d4d4d8] hover:text-white px-2.5 py-1.5 rounded-lg transition-all cursor-pointer"
+            title="Servidor LAN activo para móvil"
+          >
+            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            <Server class="w-3.5 h-3.5 text-[#a1a1aa]" />
+            <span class="text-[11px] font-mono hidden md:inline">{serverInfo.ip}:48792</span>
+            <span class="text-[11px] md:hidden">LAN</span>
+          </button>
+        {/if}
         {#if updateStatus}
           <div class="flex items-center gap-1.5 text-[11px] px-2 py-1 rounded bg-[#18181b] border border-[#3f3f46] text-[#e4e4e7]">
             <Activity class="w-3 h-3 animate-pulse" />
@@ -393,6 +581,69 @@
 
     <!-- Console Input Panel -->
     <div class="bg-[#10121a] border border-[#27272a] rounded-xl p-3.5 sm:p-4 space-y-3.5 shadow-sm">
+      <!-- Target Switcher: Local Device vs Remote PC -->
+      <div class="flex items-center justify-between gap-1 p-1 bg-[#090a0f] border border-[#27272a] rounded-lg text-xs">
+        <div class="grid grid-cols-2 gap-1 flex-1">
+          <button
+            onclick={() => setDownloadTarget("local")}
+            class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all cursor-pointer ${
+              downloadTarget === "local"
+                ? "bg-[#27272a] text-white font-bold border border-[#3f3f46] shadow-sm"
+                : "text-[#71717a] hover:text-[#d4d4d8]"
+            }`}
+          >
+            <Smartphone class="w-3.5 h-3.5" />
+            <span class="truncate">Descargar en móvil</span>
+          </button>
+          <button
+            onclick={() => setDownloadTarget("remote")}
+            class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all cursor-pointer relative ${
+              downloadTarget === "remote"
+                ? "bg-[#27272a] text-white font-bold border border-[#3f3f46] shadow-sm"
+                : "text-[#71717a] hover:text-[#d4d4d8]"
+            }`}
+          >
+            <Monitor class="w-3.5 h-3.5" />
+            <span class="truncate">Enviar a PC (Navidrome)</span>
+            {#if remoteConnected}
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0 animate-pulse"></span>
+            {/if}
+          </button>
+        </div>
+        <button
+          onclick={() => showRemoteModal = true}
+          class={`p-2 rounded-md border transition-colors cursor-pointer shrink-0 ${
+            remoteConnected
+              ? "bg-emerald-950/40 border-emerald-800 text-emerald-300"
+              : "bg-[#18181b] border-[#27272a] hover:border-[#3f3f46] text-[#71717a] hover:text-white"
+          }`}
+          title="Configurar IP de la PC"
+        >
+          <Radio class="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {#if downloadTarget === "remote"}
+        <div class="flex items-center justify-between px-3 py-2 bg-emerald-950/20 border border-emerald-900/40 rounded-lg text-[11px] text-[#a1a1aa]">
+          <div class="flex items-center gap-2 truncate">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse"></span>
+            <span class="truncate">
+              {#if remotePcIp}
+                Destino: <strong class="text-white font-mono">{remotePcIp}:48792</strong> &rarr; <span class="text-emerald-400 font-mono">~/navidrome/music</span>
+              {:else}
+                <span class="text-amber-400 font-medium">⚠️ Falta configurar la IP de tu PC</span>
+              {/if}
+            </span>
+          </div>
+          <button
+            onclick={() => showRemoteModal = true}
+            class="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-mono shrink-0 ml-2 cursor-pointer"
+          >
+            {remotePcIp ? "cambiar IP" : "configurar"}
+          </button>
+        </div>
+      {/if}
+
       <!-- Tabs / Mode Bar (Mobile-first 50/50 segmented control) -->
       <div class="grid grid-cols-2 p-1 bg-[#090a0f] border border-[#27272a] rounded-lg gap-1">
         <button
@@ -589,11 +840,19 @@
           <div class="pt-1">
             <button
               onclick={handleDownload}
-              disabled={!urlInput.trim()}
+              disabled={!urlInput.trim() || isSendingRemote}
               class="w-full py-3 rounded-lg bg-white hover:bg-[#e4e4e7] active:scale-[0.98] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-white/5"
             >
-              <Download class="w-4 h-4 stroke-[2.5]" />
-              <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
+              {#if isSendingRemote}
+                <Loader2 class="w-4 h-4 animate-spin text-black" />
+                <span>enviando a pc...</span>
+              {:else if downloadTarget === "remote"}
+                <Monitor class="w-4 h-4 stroke-[2.5]" />
+                <span>{currentPreview?.is_playlist ? `enviar playlist a pc (navidrome)` : 'enviar orden a pc (navidrome)'}</span>
+              {:else}
+                <Download class="w-4 h-4 stroke-[2.5]" />
+                <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
+              {/if}
             </button>
           </div>
         </div>
@@ -761,12 +1020,18 @@
                           {/if}
                         {:else}
                           <button
-                            onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "audio", "mp3")}
-                            class="flex items-center gap-1.5 text-xs bg-white hover:bg-[#e4e4e7] active:scale-95 text-black font-bold px-3 py-1.5 rounded-md transition-all cursor-pointer shadow-sm"
-                            title="Descargar MP3 con ID3 tags y carátula para Navidrome"
+                            onclick={() => handleSearchDownload(item, "audio")}
+                            disabled={isSendingRemote}
+                            class="flex items-center gap-1.5 text-xs bg-white hover:bg-[#e4e4e7] active:scale-95 text-black font-bold px-3 py-1.5 rounded-md transition-all cursor-pointer shadow-sm disabled:opacity-40"
+                            title={downloadTarget === "remote" ? "Enviar MP3 a tu PC (Navidrome)" : "Descargar MP3 con ID3 tags y carátula para Navidrome"}
                           >
-                            <Music class="w-3.5 h-3.5 stroke-[2.5]" />
-                            <span>MP3</span>
+                            {#if downloadTarget === "remote"}
+                              <Monitor class="w-3.5 h-3.5 stroke-[2.5]" />
+                              <span>MP3</span>
+                            {:else}
+                              <Music class="w-3.5 h-3.5 stroke-[2.5]" />
+                              <span>MP3</span>
+                            {/if}
                           </button>
                         {/if}
 
@@ -807,12 +1072,18 @@
                           {/if}
                         {:else}
                           <button
-                            onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, "video", "best")}
-                            class="flex items-center gap-1.5 text-xs bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-3 py-1.5 rounded-md transition-all cursor-pointer active:scale-95"
-                            title="Descargar Video MP4"
+                            onclick={() => handleSearchDownload(item, "video")}
+                            disabled={isSendingRemote}
+                            class="flex items-center gap-1.5 text-xs bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-3 py-1.5 rounded-md transition-all cursor-pointer active:scale-95 disabled:opacity-40"
+                            title={downloadTarget === "remote" ? "Enviar Video a tu PC" : "Descargar Video MP4"}
                           >
-                            <Video class="w-3.5 h-3.5" />
-                            <span>Video</span>
+                            {#if downloadTarget === "remote"}
+                              <Monitor class="w-3.5 h-3.5" />
+                              <span>Video</span>
+                            {:else}
+                              <Video class="w-3.5 h-3.5" />
+                              <span>Video</span>
+                            {/if}
                           </button>
                         {/if}
 
@@ -929,14 +1200,20 @@
                     </div>
                   {:else if item.status === "finished"}
                     <div class="flex items-center gap-1.5">
-                      <button
-                        onclick={() => openInFolder(item)}
-                        class="flex items-center gap-1 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer"
-                        title="Abrir archivo o carpeta"
-                      >
-                        <FolderOpen class="w-3.5 h-3.5" />
-                        <span>abrir</span>
-                      </button>
+                      {#if item.outputPath === "~/navidrome/music"}
+                        <span class="text-[10px] text-emerald-400 font-mono bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
+                          Navidrome PC
+                        </span>
+                      {:else}
+                        <button
+                          onclick={() => openInFolder(item)}
+                          class="flex items-center gap-1 text-[11px] bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-[#d4d4d8] hover:text-white px-2.5 py-1 rounded-md transition-colors cursor-pointer"
+                          title="Abrir archivo o carpeta"
+                        >
+                          <FolderOpen class="w-3.5 h-3.5" />
+                          <span>abrir</span>
+                        </button>
+                      {/if}
                       <div class="flex items-center gap-0.5 text-white">
                         <Check class="w-4 h-4 stroke-[3]" />
                       </div>
@@ -960,6 +1237,175 @@
         </div>
       {/if}
     </div>
+
+    <!-- Modal: Información del Servidor PC -->
+    {#if showServerInfoModal}
+      <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-[#10121a] border border-[#3f3f46] rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl relative">
+          <button
+            onclick={() => showServerInfoModal = false}
+            class="absolute top-4 right-4 text-[#71717a] hover:text-white cursor-pointer"
+          >
+            <X class="w-4 h-4" />
+          </button>
+
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-emerald-950/50 border border-emerald-800 flex items-center justify-center text-emerald-400">
+              <Server class="w-5 h-5" />
+            </div>
+            <div>
+              <h3 class="text-sm font-bold text-white">Servidor LAN SnapStream</h3>
+              <p class="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                Activo y esperando órdenes del móvil
+              </p>
+            </div>
+          </div>
+
+          <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded-lg space-y-2 text-xs">
+            <div class="flex items-center justify-between">
+              <span class="text-[#71717a]">IP Local:</span>
+              <div class="flex items-center gap-2">
+                <code class="text-white font-bold bg-[#18181b] px-2 py-0.5 rounded border border-[#3f3f46]">
+                  {serverInfo?.ip || '127.0.0.1'}
+                </code>
+                <button
+                  onclick={copyServerIpToClipboard}
+                  class="flex items-center gap-1 text-[11px] bg-white hover:bg-[#e4e4e7] text-black font-bold px-2 py-0.5 rounded transition-colors cursor-pointer"
+                >
+                  {#if copiedServerIp}
+                    <Check class="w-3 h-3 stroke-[3]" />
+                    <span>¡Copiada!</span>
+                  {:else}
+                    <Copy class="w-3 h-3" />
+                    <span>Copiar</span>
+                  {/if}
+                </button>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <span class="text-[#71717a]">Puerto LAN:</span>
+              <code class="text-[#a1a1aa] font-mono">48792</code>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <span class="text-[#71717a]">Destino automático:</span>
+              <span class="text-emerald-400 font-mono truncate max-w-[210px]" title="~/navidrome/music">~/navidrome/music</span>
+            </div>
+          </div>
+
+          <div class="text-[11px] text-[#71717a] space-y-1.5 leading-relaxed bg-[#18181b]/50 p-3 rounded-lg border border-[#27272a]">
+            <p class="text-[#a1a1aa] font-semibold">¿Cómo conectar tu móvil?</p>
+            <ol class="list-decimal list-inside space-y-1">
+              <li>Conecta tu celular a la misma red Wi-Fi.</li>
+              <li>Abre SnapStream en el móvil y pulsa <strong class="text-white">Enviar a PC</strong>.</li>
+              <li>Escribe la IP <code class="text-white font-bold">{serverInfo?.ip}</code> y guarda.</li>
+              <li>¡Las canciones se descargarán directamente en tu PC sin ocupar espacio en el móvil!</li>
+            </ol>
+          </div>
+
+          <div class="flex justify-end pt-1">
+            <button
+              onclick={() => showServerInfoModal = false}
+              class="px-4 py-2 bg-white hover:bg-[#e4e4e7] text-black font-bold text-xs rounded-lg transition-colors cursor-pointer"
+            >
+              Entendido
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Modal: Conectar con PC Remota -->
+    {#if showRemoteModal}
+      <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-[#10121a] border border-[#3f3f46] rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl relative">
+          <button
+            onclick={() => showRemoteModal = false}
+            class="absolute top-4 right-4 text-[#71717a] hover:text-white cursor-pointer"
+          >
+            <X class="w-4 h-4" />
+          </button>
+
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-[#18181b] border border-[#3f3f46] flex items-center justify-center text-white">
+              <Monitor class="w-5 h-5" />
+            </div>
+            <div>
+              <h3 class="text-sm font-bold text-white">Enviar a PC Remota (Navidrome)</h3>
+              <p class="text-[11px] text-[#71717a]">Descarga en tu PC sin ocupar espacio en el móvil</p>
+            </div>
+          </div>
+
+          <p class="text-xs text-[#a1a1aa] leading-relaxed">
+            Ingresa la IP de tu computadora (deben estar en la misma red Wi-Fi). Las canciones se guardarán automáticamente en <code class="text-white">~/navidrome/music</code>.
+          </p>
+
+          <div class="space-y-1.5">
+            <span class="text-[11px] text-[#71717a] font-medium block">IP de la PC en tu red local:</span>
+            <div class="flex gap-2">
+              <input
+                type="text"
+                placeholder="Ej: 192.168.1.69"
+                bind:value={remotePcIp}
+                onkeydown={(e) => e.key === "Enter" && testRemoteConnection()}
+                class="flex-1 bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] rounded-lg px-3 py-2 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none"
+              />
+              <button
+                onclick={() => testRemoteConnection()}
+                disabled={isTestingRemote || !remotePcIp.trim()}
+                class="px-3.5 py-2 bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-white text-xs font-mono font-medium rounded-lg transition-colors cursor-pointer disabled:opacity-40 flex items-center gap-1.5 shrink-0"
+              >
+                {#if isTestingRemote}
+                  <Loader2 class="w-3.5 h-3.5 animate-spin" />
+                  <span>probando...</span>
+                {:else}
+                  <Wifi class="w-3.5 h-3.5" />
+                  <span>probar</span>
+                {/if}
+              </button>
+            </div>
+          </div>
+
+          <!-- Test connection status banner -->
+          {#if remoteConnected === true}
+            <div class="p-3 bg-emerald-950/40 border border-emerald-800 rounded-lg text-emerald-300 text-xs flex items-center gap-2">
+              <Check class="w-4 h-4 shrink-0 text-emerald-400 stroke-[3]" />
+              <span>¡Conexión establecida con la PC con éxito!</span>
+            </div>
+          {:else if remoteConnected === false}
+            <div class="p-3 bg-red-950/40 border border-red-800 rounded-lg text-red-300 text-xs flex items-center gap-2">
+              <AlertTriangle class="w-4 h-4 shrink-0 text-red-400" />
+              <span>No se pudo conectar a la PC. Verifica que SnapStream esté abierto en tu computadora y la IP sea correcta.</span>
+            </div>
+          {/if}
+
+          <div class="flex items-center justify-end gap-2 pt-2 border-t border-[#27272a]">
+            <button
+              onclick={() => showRemoteModal = false}
+              class="px-3.5 py-2 text-xs text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
+            >
+              Cancelar
+            </button>
+            <button
+              onclick={() => {
+                if (remotePcIp.trim()) {
+                  setDownloadTarget("remote");
+                  localStorage.setItem("snapstream_remote_ip", remotePcIp.trim());
+                  showToast(`Destino configurado a PC: ${remotePcIp.trim()}`);
+                }
+                showRemoteModal = false;
+              }}
+              disabled={!remotePcIp.trim()}
+              class="px-4 py-2 bg-white hover:bg-[#e4e4e7] disabled:opacity-40 text-black font-bold text-xs rounded-lg transition-colors cursor-pointer"
+            >
+              Guardar y Activar
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     {#if toastMessage}
       <div class="fixed bottom-6 left-4 right-4 sm:left-auto sm:right-6 sm:w-auto mx-auto max-w-sm z-50 flex items-center gap-2.5 bg-[#18181b] border border-[#3f3f46] text-white px-4 py-3 rounded-xl shadow-2xl text-xs font-mono">

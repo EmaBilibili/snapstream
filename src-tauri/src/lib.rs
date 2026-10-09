@@ -6,6 +6,23 @@ use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDownloadPayload {
+    pub url: String,
+    pub title: String,
+    pub mode: String,
+    pub quality: String,
+    pub thumbnail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub ip: String,
+    pub port: u16,
+    pub url: String,
+    pub is_running: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistItem {
     pub url: String,
     pub title: String,
@@ -726,6 +743,189 @@ async fn start_download(
     Ok(id)
 }
 
+fn get_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+#[tauri::command]
+fn get_server_info() -> ServerInfo {
+    let ip = get_local_ip();
+    let port = 48792;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let is_running = true;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let is_running = false;
+
+    ServerInfo {
+        url: format!("http://{}:{}", ip, port),
+        ip,
+        port,
+        is_running,
+    }
+}
+
+#[tauri::command]
+async fn ping_remote_server(pc_ip: String) -> Result<serde_json::Value, String> {
+    let clean_ip = pc_ip.trim().trim_start_matches("http://").trim_start_matches("https://");
+    let target = if clean_ip.contains(':') {
+        format!("http://{}/api/ping", clean_ip)
+    } else {
+        format!("http://{}:48792/api/ping", clean_ip)
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.get(&target).send().await.map_err(|e| format!("No se pudo conectar a la PC ({}): {}", target, e))?;
+    let data = resp.json::<serde_json::Value>().await.map_err(|e| format!("Respuesta no válida: {}", e))?;
+    Ok(data)
+}
+
+#[tauri::command]
+async fn send_remote_download(pc_ip: String, item: RemoteDownloadPayload) -> Result<String, String> {
+    let clean_ip = pc_ip.trim().trim_start_matches("http://").trim_start_matches("https://");
+    let target = if clean_ip.contains(':') {
+        format!("http://{}/api/download", clean_ip)
+    } else {
+        format!("http://{}:48792/api/download", clean_ip)
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client.post(&target)
+        .json(&item)
+        .send()
+        .await
+        .map_err(|e| format!("Error enviando orden a la PC: {}", e))?;
+
+    if resp.status().is_success() {
+        Ok(format!("Descarga enviada a {}", clean_ip))
+    } else {
+        let err_text = resp.text().await.unwrap_or_else(|_| "Error desconocido".into());
+        Err(format!("PC respondió con error: {}", err_text))
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn start_embedded_server(app: AppHandle, port: u16) {
+    std::thread::spawn(move || {
+        let addr = format!("0.0.0.0:{}", port);
+        let server = match tiny_http::Server::http(&addr) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[SnapStream Remote] No se pudo iniciar servidor en {}: {}", addr, e);
+                return;
+            }
+        };
+
+        for mut request in server.incoming_requests() {
+            let method = request.method().clone();
+            let url = request.url().to_string();
+
+            // Preflight CORS
+            if method == tiny_http::Method::Options {
+                let response = tiny_http::Response::empty(200)
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type, Authorization"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if url == "/api/ping" || url == "/api/status" {
+                let local_ip = get_local_ip();
+                let body = serde_json::json!({
+                    "status": "ok",
+                    "app": "SnapStream",
+                    "version": "0.1.0",
+                    "ip": local_ip,
+                    "port": port
+                }).to_string();
+
+                let response = tiny_http::Response::from_string(body)
+                    .with_status_code(200)
+                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if url == "/api/download" && method == tiny_http::Method::Post {
+                let mut content = String::new();
+                let _ = request.as_reader().read_to_string(&mut content);
+
+                if let Ok(payload) = serde_json::from_str::<RemoteDownloadPayload>(&content) {
+                    let download_id = format!("remote_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    let app_clone = app.clone();
+
+                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                    let navidrome_dir = format!("{}/navidrome/music", home);
+                    let target_dir = if std::path::Path::new(&navidrome_dir).exists() {
+                        navidrome_dir
+                    } else {
+                        format!("{}/Downloads", home)
+                    };
+
+                    let dl_url = payload.url.clone();
+                    let dl_mode = payload.mode.clone();
+                    let dl_quality = payload.quality.clone();
+                    let dl_thumb = payload.thumbnail.clone();
+                    let dl_id = download_id.clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        let _ = start_download(
+                            app_clone,
+                            dl_id,
+                            dl_url,
+                            target_dir,
+                            dl_mode,
+                            dl_quality,
+                            dl_thumb,
+                        ).await;
+                    });
+
+                    let body = serde_json::json!({
+                        "status": "queued",
+                        "id": download_id,
+                        "title": payload.title
+                    }).to_string();
+
+                    let response = tiny_http::Response::from_string(body)
+                        .with_status_code(200)
+                        .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                        .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                    let _ = request.respond(response);
+                    continue;
+                } else {
+                    let response = tiny_http::Response::from_string(r#"{"error": "JSON no válido"}"#)
+                        .with_status_code(400)
+                        .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                        .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                    let _ = request.respond(response);
+                    continue;
+                }
+            }
+
+            let response = tiny_http::Response::from_string(r#"{"error": "Ruta no encontrada"}"#)
+                .with_status_code(404)
+                .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -737,7 +937,13 @@ pub fn run() {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .setup(|app| {
+                let handle = app.handle().clone();
+                start_embedded_server(handle, 48792);
+                Ok(())
+            });
     }
 
     builder
@@ -745,7 +951,10 @@ pub fn run() {
             get_media_info,
             start_download,
             open_path_in_file_manager,
-            search_music
+            search_music,
+            get_server_info,
+            ping_remote_server,
+            send_remote_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
