@@ -85,6 +85,29 @@ fn get_ytdlp_cmd() -> std::path::PathBuf {
     std::path::PathBuf::from("yt-dlp")
 }
 
+fn get_browser_cookie_arg() -> Option<String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let candidates = [
+            ("brave", "brave"),
+            ("google-chrome", "chrome"),
+            ("google-chrome-stable", "chrome"),
+            ("chromium", "chromium"),
+            ("firefox", "firefox"),
+            ("zen-browser", "firefox"),
+            ("vivaldi", "vivaldi"),
+            ("opera", "opera"),
+        ];
+
+        for (bin, browser_name) in candidates {
+            if which::which(bin).is_ok() {
+                return Some(browser_name.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn normalize_social_url(url: &str) -> String {
     let clean = url.trim().to_string();
     // YouTube Music comparte IDs idénticos con YouTube estándar,
@@ -146,25 +169,55 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
     let clean_url = normalize_social_url(&url);
     let ytdlp_path = get_ytdlp_cmd();
 
-    // Comprobar primero con flat-playlist para detectar playlists sin descargar todo el contenido
-    let output = Command::new(&ytdlp_path)
-        .args([
-            "--dump-single-json",
-            "--flat-playlist",
-            "--no-warnings",
-            "--add-header",
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-            &clean_url,
-        ])
-        .output();
+    // Preparar argumentos para detectar info y playlists sin descargar el flujo completo
+    let cmd_base_args = [
+        "--dump-single-json",
+        "--flat-playlist",
+        "--no-warnings",
+        "--add-header",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    ];
 
-    if let Ok(out) = output {
+    let browser_cookie = get_browser_cookie_arg();
+    let is_private_playlist = clean_url.contains("list=LM") || clean_url.contains("list=LL") || clean_url.contains("list=WL");
+
+    let mut output = None;
+
+    // Si es una playlist privada como Liked Music (list=LM), usar cookies directamente
+    if is_private_playlist {
+        if let Some(ref browser) = browser_cookie {
+            let mut args = cmd_base_args.to_vec();
+            args.push("--cookies-from-browser");
+            args.push(browser);
+            args.push(&clean_url);
+            output = Command::new(&ytdlp_path).args(args).output().ok();
+        }
+    }
+
+    if output.is_none() || !output.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+        let mut args = cmd_base_args.to_vec();
+        args.push(&clean_url);
+        output = Command::new(&ytdlp_path).args(args).output().ok();
+    }
+
+    // Si falló y tenemos navegador disponible, reintentar con cookies de navegador
+    if (output.is_none() || !output.as_ref().map(|o| o.status.success()).unwrap_or(false)) && !is_private_playlist {
+        if let Some(ref browser) = browser_cookie {
+            let mut args = cmd_base_args.to_vec();
+            args.push("--cookies-from-browser");
+            args.push(browser);
+            args.push(&clean_url);
+            output = Command::new(&ytdlp_path).args(args).output().ok();
+        }
+    }
+
+    if let Some(out) = output {
         if out.status.success() {
             let json_str = String::from_utf8_lossy(&out.stdout);
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
                 let is_playlist = v.get("_type").and_then(|t| t.as_str()) == Some("playlist");
                 let title = v["title"].as_str().unwrap_or("Sin título").to_string();
-                let thumbnail = v["thumbnail"].as_str().map(|s| s.to_string());
+                let mut thumbnail = v["thumbnail"].as_str().map(|s| s.to_string());
                 let duration = v["duration"].as_f64();
                 let uploader = v["uploader"].as_str().map(|s| s.to_string());
 
@@ -174,7 +227,18 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
                 if is_playlist {
                     if let Some(entries) = v["entries"].as_array() {
                         count = Some(entries.len());
-                        for e in entries.iter().take(50) {
+                        // Si la playlist no tiene thumbnail propio, usar el del primer tema
+                        if thumbnail.is_none() {
+                            if let Some(first) = entries.first() {
+                                if let Some(thumbs) = first["thumbnails"].as_array() {
+                                    if let Some(t) = thumbs.last().and_then(|th| th["url"].as_str()) {
+                                        thumbnail = Some(t.to_string());
+                                    }
+                                }
+                            }
+                        }
+
+                        for e in entries.iter().take(2000) {
                             let entry_id = e["id"].as_str().unwrap_or("");
                             let entry_url = if !entry_id.is_empty() {
                                 format!("https://www.youtube.com/watch?v={}", entry_id)
