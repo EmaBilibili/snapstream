@@ -191,8 +191,6 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
         "--dump-single-json",
         "--flat-playlist",
         "--no-warnings",
-        "--add-header",
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
     ];
 
     let browser_cookie = get_browser_cookie_arg();
@@ -321,8 +319,6 @@ async fn search_music(query: String) -> Result<Vec<SearchResult>, String> {
             "--dump-json",
             "--flat-playlist",
             "--no-warnings",
-            "--add-header",
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
         ])
         .output();
 
@@ -384,8 +380,6 @@ async fn search_music(query: String) -> Result<Vec<SearchResult>, String> {
                 "--dump-json",
                 "--flat-playlist",
                 "--no-warnings",
-                "--add-header",
-                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
             ])
             .output()
             .map_err(|e| format!("Error al ejecutar búsqueda: {}", e))?;
@@ -578,10 +572,6 @@ async fn start_download(
         };
 
         cmd.args(["--newline", "-o", &output_template]);
-        cmd.args([
-            "--add-header",
-            "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-        ]);
 
         let browser_cookie = get_browser_cookie_arg();
         if let Some(ref browser) = browser_cookie {
