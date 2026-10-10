@@ -573,9 +573,12 @@ async fn start_download(
 
         cmd.args(["--newline", "-o", &output_template]);
 
-        let browser_cookie = get_browser_cookie_arg();
-        if let Some(ref browser) = browser_cookie {
-            cmd.args(["--cookies-from-browser", browser]);
+        let is_private_playlist = clean_url.contains("list=LM") || clean_url.contains("list=LL") || clean_url.contains("list=WL");
+        if is_private_playlist {
+            let browser_cookie = get_browser_cookie_arg();
+            if let Some(ref browser) = browser_cookie {
+                cmd.args(["--cookies-from-browser", browser]);
+            }
         }
 
         if clean_url.contains("/playlist?list=") || clean_url.contains("list=LM") || clean_url.contains("list=LL") {

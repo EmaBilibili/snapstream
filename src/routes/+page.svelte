@@ -378,7 +378,13 @@
   }
 
   async function handleDownload() {
-    if (!urlInput.trim()) return;
+    const raw = urlInput.trim();
+    if (!raw) return;
+
+    // Si aún no se inspeccionó o se pegó una URL de playlist sin inspeccionar, inspeccionar primero
+    if (!currentPreview && (raw.includes("playlist") || raw.includes("list="))) {
+      await handleInspectUrl();
+    }
 
     if (downloadTarget === "remote") {
       if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
@@ -392,22 +398,24 @@
 
       const title = currentPreview?.title || "recurso_multimedia";
       const thumb = currentPreview?.thumbnail || null;
-      await sendRemoteDownload(urlInput.trim(), title, selectedMode, selectedQuality, thumb);
+      await sendRemoteDownload(raw, title, selectedMode, selectedQuality, thumb);
       return;
     }
 
-    // Si es una playlist, descargar todos los elementos detectados
+    // Si es una playlist, descargar todos los elementos detectados secuencialmente
     if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
       const items = currentPreview.playlist_items;
+      showToast(`Descargando playlist (${items.length} pistas)...`);
       for (const item of items) {
         triggerSingleDownload(item.url, item.title, currentPreview.thumbnail);
+        await new Promise((r) => setTimeout(r, 600));
       }
       return;
     }
 
     const title = currentPreview?.title || "recurso_multimedia";
     const thumb = currentPreview?.thumbnail || null;
-    triggerSingleDownload(urlInput.trim(), title, thumb);
+    triggerSingleDownload(raw, title, thumb);
   }
 
   function handleSearchDownload(item: SearchResult, mode: "audio" | "video") {
