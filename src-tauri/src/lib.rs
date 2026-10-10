@@ -583,6 +583,17 @@ async fn start_download(
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
         ]);
 
+        let browser_cookie = get_browser_cookie_arg();
+        if let Some(ref browser) = browser_cookie {
+            cmd.args(["--cookies-from-browser", browser]);
+        }
+
+        if clean_url.contains("/playlist?list=") || clean_url.contains("list=LM") || clean_url.contains("list=LL") {
+            cmd.arg("--yes-playlist");
+        } else {
+            cmd.arg("--no-playlist");
+        }
+
         if mode == "audio" {
             cmd.args([
                 "-x",
@@ -854,6 +865,39 @@ async fn send_remote_download(
     }
 }
 
+#[tauri::command]
+async fn get_remote_media_info(pc_ip: String, url: String) -> Result<MediaMetadata, String> {
+    let target = resolve_target_url(&pc_ip, "api/info");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let payload = serde_json::json!({ "url": url });
+
+    let resp = client
+        .post(&target)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Error conectando a la PC: {}", e))?;
+
+    if resp.status().is_success() {
+        let meta = resp
+            .json::<MediaMetadata>()
+            .await
+            .map_err(|e| format!("Error procesando info: {}", e))?;
+        Ok(meta)
+    } else {
+        let err_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Error desconocido".into());
+        Err(format!("PC respondió con error: {}", err_text))
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_embedded_server(app: AppHandle, port: u16) {
     std::thread::spawn(move || {
@@ -954,6 +998,42 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                 }
             }
 
+            if (url == "/api/info" || url.starts_with("/api/info?")) && (method == tiny_http::Method::Post || method == tiny_http::Method::Get) {
+                let target_url = if method == tiny_http::Method::Post {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+                    serde_json::from_str::<serde_json::Value>(&content)
+                        .ok()
+                        .and_then(|v| v["url"].as_str().map(|s| s.to_string()))
+                } else {
+                    url.split("url=").nth(1).map(|u| u.to_string())
+                };
+
+                if let Some(u) = target_url {
+                    let res = tauri::async_runtime::block_on(get_media_info(u));
+                    match res {
+                        Ok(meta) => {
+                            let body = serde_json::to_string(&meta).unwrap_or_default();
+                            let response = tiny_http::Response::from_string(body)
+                                .with_status_code(200)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                        Err(e) => {
+                            let body = serde_json::json!({ "error": e }).to_string();
+                            let response = tiny_http::Response::from_string(body)
+                                .with_status_code(500)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let response = tiny_http::Response::from_string(r#"{"error": "Ruta no encontrada"}"#)
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
@@ -990,7 +1070,8 @@ pub fn run() {
             search_music,
             get_server_info,
             ping_remote_server,
-            send_remote_download
+            send_remote_download,
+            get_remote_media_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

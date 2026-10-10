@@ -292,7 +292,19 @@
     currentPreview = null;
 
     try {
-      const data = await invoke<MediaMetadata>("get_media_info", { url: raw });
+      let data: MediaMetadata;
+      if (downloadTarget === "remote" && remotePcIp.trim()) {
+        try {
+          data = await invoke<MediaMetadata>("get_remote_media_info", {
+            pcIp: remotePcIp.trim(),
+            url: raw
+          });
+        } catch {
+          data = await invoke<MediaMetadata>("get_media_info", { url: raw });
+        }
+      } else {
+        data = await invoke<MediaMetadata>("get_media_info", { url: raw });
+      }
       currentPreview = data;
       if (data.is_direct_image) {
         selectedMode = "image";
