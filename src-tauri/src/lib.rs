@@ -62,6 +62,112 @@ pub struct DownloadProgress {
     pub output_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackItemQuery {
+    pub id: Option<String>,
+    pub title: String,
+    pub uploader: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackExistStatus {
+    pub id: Option<String>,
+    pub title: String,
+    pub exists: bool,
+    pub matched_file: Option<String>,
+}
+
+fn clean_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_paren = false;
+    let mut in_bracket = false;
+    for c in s.chars() {
+        if c == '(' {
+            in_paren = true;
+            continue;
+        }
+        if c == ')' {
+            in_paren = false;
+            continue;
+        }
+        if c == '[' {
+            in_bracket = true;
+            continue;
+        }
+        if c == ']' {
+            in_bracket = false;
+            continue;
+        }
+        if in_paren || in_bracket {
+            continue;
+        }
+        if c.is_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(' ');
+        }
+    }
+    let noise_words = [
+        "official", "video", "audio", "lyric", "lyrics", "remastered", "topic",
+        "4k", "hd", "music", "oficial", "feat", "ft", "full"
+    ];
+    let tokens: Vec<&str> = out
+        .split_whitespace()
+        .filter(|w| !noise_words.contains(w))
+        .collect();
+    tokens.join(" ")
+}
+
+fn match_track_against_files(
+    title: &str,
+    uploader: Option<&str>,
+    file_stems: &[(String, String)],
+) -> Option<String> {
+    let clean_title = clean_string(title);
+    if clean_title.is_empty() {
+        return None;
+    }
+    let clean_uploader = uploader.map(clean_string).unwrap_or_default();
+    let combined = if !clean_uploader.is_empty() {
+        format!("{} {}", clean_uploader, clean_title)
+    } else {
+        clean_title.clone()
+    };
+
+    // 1. Coincidencia exacta o normalizada
+    for (orig, cfile) in file_stems {
+        if &clean_title == cfile || &combined == cfile {
+            return Some(orig.clone());
+        }
+    }
+
+    // 2. Coincidencia de subcadena
+    for (orig, cfile) in file_stems {
+        if clean_title.len() >= 4 && (cfile.contains(&clean_title) || clean_title.contains(cfile)) {
+            return Some(orig.clone());
+        }
+        if !clean_uploader.is_empty() && combined.len() >= 5 && (cfile.contains(&combined) || combined.contains(cfile)) {
+            return Some(orig.clone());
+        }
+    }
+
+    // 3. Coincidencia de tokens principales
+    let title_tokens: Vec<&str> = clean_title
+        .split_whitespace()
+        .filter(|t| t.len() > 2)
+        .collect();
+    if title_tokens.len() >= 2 {
+        for (orig, cfile) in file_stems {
+            let f_tokens: std::collections::HashSet<&str> = cfile.split_whitespace().collect();
+            if title_tokens.iter().all(|t| f_tokens.contains(t)) {
+                return Some(orig.clone());
+            }
+        }
+    }
+
+    None
+}
+
 fn get_ytdlp_cmd() -> std::path::PathBuf {
     // 1. Si existe en PATH del sistema
     if let Ok(p) = which::which("yt-dlp") {
@@ -187,11 +293,16 @@ async fn get_media_info(url: String) -> Result<MediaMetadata, String> {
     let ytdlp_path = get_ytdlp_cmd();
 
     // Preparar argumentos para detectar info y playlists sin descargar el flujo completo
-    let cmd_base_args = [
+    let mut cmd_base_args = vec![
         "--dump-single-json",
         "--flat-playlist",
         "--no-warnings",
     ];
+
+    if which::which("node").is_ok() {
+        cmd_base_args.push("--js-runtimes");
+        cmd_base_args.push("node");
+    }
 
     let browser_cookie = get_browser_cookie_arg();
     let is_private_playlist = clean_url.contains("list=LM") || clean_url.contains("list=LL") || clean_url.contains("list=WL");
@@ -309,17 +420,25 @@ async fn search_music(query: String) -> Result<Vec<SearchResult>, String> {
     let ytdlp_path = get_ytdlp_cmd();
     let mut results = Vec::new();
 
+    let has_node = which::which("node").is_ok();
+
     // 1. Intentar primero búsqueda en YouTube Music (prioriza versiones oficiales de audio/estudio sin intros de video)
     let yt_music_query = clean_query.replace(' ', "+");
     let yt_music_url = format!("https://music.youtube.com/search?q={}", yt_music_query);
 
+    let mut ytm_args = vec![
+        yt_music_url.as_str(),
+        "--dump-json",
+        "--flat-playlist",
+        "--no-warnings",
+    ];
+    if has_node {
+        ytm_args.push("--js-runtimes");
+        ytm_args.push("node");
+    }
+
     let output_ytm = Command::new(&ytdlp_path)
-        .args([
-            &yt_music_url,
-            "--dump-json",
-            "--flat-playlist",
-            "--no-warnings",
-        ])
+        .args(ytm_args)
         .output();
 
     if let Ok(output) = output_ytm {
@@ -374,13 +493,18 @@ async fn search_music(query: String) -> Result<Vec<SearchResult>, String> {
     // 2. Si YouTube Music no devolvió resultados, fallback a búsqueda general ytsearch
     if results.is_empty() {
         let search_arg = format!("ytsearch8:{}", clean_query);
+        let mut general_args = vec![
+            search_arg.as_str(),
+            "--dump-json",
+            "--flat-playlist",
+            "--no-warnings",
+        ];
+        if has_node {
+            general_args.push("--js-runtimes");
+            general_args.push("node");
+        }
         let output = Command::new(&ytdlp_path)
-            .args([
-                &search_arg,
-                "--dump-json",
-                "--flat-playlist",
-                "--no-warnings",
-            ])
+            .args(general_args)
             .output()
             .map_err(|e| format!("Error al ejecutar búsqueda: {}", e))?;
 
@@ -571,7 +695,11 @@ async fn start_download(
             format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
         };
 
-        cmd.args(["--newline", "-o", &output_template]);
+        cmd.args(["--newline", "-o", &output_template, "--no-overwrites"]);
+
+        if which::which("node").is_ok() {
+            cmd.args(["--js-runtimes", "node"]);
+        }
 
         let is_private_playlist = clean_url.contains("list=LM") || clean_url.contains("list=LL") || clean_url.contains("list=WL");
         if is_private_playlist {
@@ -646,11 +774,20 @@ async fn start_download(
         };
 
         let mut final_file = None;
+        let mut already_downloaded = false;
 
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
-                if line.contains("[download] Destination:") {
+                if line.contains("has already been downloaded") || line.contains("already in target format") {
+                    already_downloaded = true;
+                    if let Some(idx) = line.find("[download] ") {
+                        let rest = &line[idx + 11..];
+                        if let Some(end_idx) = rest.find(" has already been downloaded") {
+                            final_file = Some(rest[..end_idx].trim().to_string());
+                        }
+                    }
+                } else if line.contains("[download] Destination:") {
                     let parts: Vec<&str> = line.split("[download] Destination:").collect();
                     if parts.len() > 1 {
                         final_file = Some(parts[1].trim().to_string());
@@ -714,15 +851,17 @@ async fn start_download(
         match status {
             Ok(s) if s.success() => {
                 let out_target = final_file.unwrap_or(resolved_output_dir);
+                let speed_label = if already_downloaded { "Existente".to_string() } else { "".to_string() };
+                let filename_label = if already_downloaded { Some("Pista ya existente (omitida)".to_string()) } else { None };
                 let _ = app.emit(
                     "download-progress",
                     DownloadProgress {
                         id: download_id,
                         percent: 100.0,
-                        speed: "".into(),
+                        speed: speed_label,
                         eta: "".into(),
                         status: "finished".into(),
-                        filename: None,
+                        filename: filename_label,
                         output_path: Some(out_target),
                     },
                 );
@@ -924,6 +1063,114 @@ async fn search_remote_music(pc_ip: String, query: String) -> Result<Vec<SearchR
     }
 }
 
+#[tauri::command]
+async fn check_tracks_exist(
+    target_dir: Option<String>,
+    tracks: Vec<TrackItemQuery>,
+) -> Result<Vec<TrackExistStatus>, String> {
+    let mut dirs_to_check = Vec::new();
+
+    if let Some(ref d) = target_dir {
+        let trimmed = d.trim();
+        if !trimmed.is_empty() {
+            let resolved = if trimmed.starts_with("~/") {
+                if let Ok(home) = std::env::var("HOME") {
+                    trimmed.replacen("~", &home, 1)
+                } else {
+                    trimmed.to_string()
+                }
+            } else {
+                trimmed.to_string()
+            };
+            if std::path::Path::new(&resolved).is_dir() {
+                dirs_to_check.push(resolved);
+            }
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let navi = format!("{}/navidrome/music", home);
+        if std::path::Path::new(&navi).is_dir() && !dirs_to_check.contains(&navi) {
+            dirs_to_check.push(navi);
+        }
+        let dl = format!("{}/Downloads", home);
+        if std::path::Path::new(&dl).is_dir() && !dirs_to_check.contains(&dl) {
+            dirs_to_check.push(dl);
+        }
+    }
+
+    let mut file_stems = Vec::new();
+    let audio_exts = ["mp3", "m4a", "flac", "opus", "webm", "ogg", "mp4", "wav"];
+    for dir in &dirs_to_check {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if audio_exts.contains(&ext.to_ascii_lowercase().as_str()) {
+                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                let cfile = clean_string(stem);
+                                if !cfile.is_empty() {
+                                    file_stems.push((path.to_string_lossy().to_string(), cfile));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::with_capacity(tracks.len());
+    for item in tracks {
+        let matched = match_track_against_files(&item.title, item.uploader.as_deref(), &file_stems);
+        results.push(TrackExistStatus {
+            id: item.id,
+            title: item.title,
+            exists: matched.is_some(),
+            matched_file: matched,
+        });
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+async fn check_remote_tracks_exist(
+    pc_ip: String,
+    tracks: Vec<TrackItemQuery>,
+) -> Result<Vec<TrackExistStatus>, String> {
+    let target = resolve_target_url(&pc_ip, "api/check_tracks");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let payload = serde_json::json!({ "tracks": tracks });
+
+    let resp = client
+        .post(&target)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Error consultando biblioteca de PC: {}", e))?;
+
+    if resp.status().is_success() {
+        let results = resp
+            .json::<Vec<TrackExistStatus>>()
+            .await
+            .map_err(|e| format!("Error procesando verificación de PC: {}", e))?;
+        Ok(results)
+    } else {
+        let err_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Error desconocido".into());
+        Err(format!("PC respondió con error: {}", err_text))
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_embedded_server(app: AppHandle, port: u16) {
     std::thread::spawn(move || {
@@ -1096,6 +1343,35 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                 }
             }
 
+            if (url == "/api/check_tracks" || url.starts_with("/api/check_tracks?")) && method == tiny_http::Method::Post {
+                let mut content = String::new();
+                let _ = request.as_reader().read_to_string(&mut content);
+
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(arr) = val.get("tracks") {
+                        if let Ok(tracks) = serde_json::from_value::<Vec<TrackItemQuery>>(arr.clone()) {
+                            let res = tauri::async_runtime::block_on(check_tracks_exist(None, tracks));
+                            if let Ok(results) = res {
+                                let body = serde_json::to_string(&results).unwrap_or_default();
+                                let response = tiny_http::Response::from_string(body)
+                                    .with_status_code(200)
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                                let _ = request.respond(response);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                let response = tiny_http::Response::from_string(r#"{"error": "JSON no válido"}"#)
+                    .with_status_code(400)
+                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                    .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                let _ = request.respond(response);
+                continue;
+            }
+
             let response = tiny_http::Response::from_string(r#"{"error": "Ruta no encontrada"}"#)
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
@@ -1134,8 +1410,43 @@ pub fn run() {
             ping_remote_server,
             send_remote_download,
             get_remote_media_info,
-            search_remote_music
+            search_remote_music,
+            check_tracks_exist,
+            check_remote_tracks_exist
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_check_tracks_exist() {
+        let tracks = vec![
+            TrackItemQuery {
+                id: Some("1".into()),
+                title: "Billy Idol - Dancing With Myself (Official Music Video)".into(),
+                uploader: Some("Billy Idol".into()),
+            },
+            TrackItemQuery {
+                id: Some("2".into()),
+                title: "Moonlight".into(),
+                uploader: Some("XXXTENTACION".into()),
+            },
+            TrackItemQuery {
+                id: Some("3".into()),
+                title: "Random Nonexistent Song 99999".into(),
+                uploader: None,
+            },
+        ];
+
+        let results = check_tracks_exist(None, tracks).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results[0].exists, "Billy Idol should exist in ~/navidrome/music");
+        assert!(results[1].exists, "XXXTENTACION Moonlight should exist in ~/navidrome/music");
+        assert!(!results[2].exists, "Nonexistent track should not exist");
+    }
+}
+

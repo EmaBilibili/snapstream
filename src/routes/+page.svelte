@@ -119,6 +119,72 @@
   let showServerInfoModal = $state(false);
   let copiedServerIp = $state(false);
   let isSendingRemote = $state(false);
+  interface TrackExistStatus {
+    id?: string;
+    title: string;
+    exists: boolean;
+    matched_file?: string;
+  }
+
+  let existingMap = $state<Record<string, { exists: boolean; matched_file?: string }>>({});
+  let isCheckingDuplicates = $state(false);
+  let showPlaylistItemsDrawer = $state(false);
+
+  let pendingPlaylistCount = $derived(
+    currentPreview?.is_playlist
+      ? (currentPreview.playlist_items?.filter((it, idx) => !(existingMap[`pl_${idx}`]?.exists || existingMap[it.title]?.exists)).length ?? currentPreview.playlist_items?.length ?? 0)
+      : 0
+  );
+
+  let isPlaylistAllInLib = $derived(
+    Boolean(currentPreview?.is_playlist && currentPreview.playlist_items?.length && pendingPlaylistCount === 0)
+  );
+
+  let isSingleInLib = $derived(
+    Boolean(!currentPreview?.is_playlist && (existingMap["preview_single"]?.exists || (currentPreview?.title && existingMap[currentPreview.title]?.exists)))
+  );
+
+  async function checkTracksInLibrary(
+    items: { id?: string; title: string; uploader?: string | null }[]
+  ) {
+    if (!items || items.length === 0) return;
+    isCheckingDuplicates = true;
+    try {
+      const payload = items.map((it) => ({
+        id: it.id || it.title,
+        title: it.title,
+        uploader: it.uploader || null
+      }));
+
+      let results: TrackExistStatus[] = [];
+      if (downloadTarget === "remote" && remotePcIp.trim()) {
+        try {
+          results = await invoke<TrackExistStatus[]>("check_remote_tracks_exist", {
+            pcIp: remotePcIp.trim(),
+            tracks: payload
+          });
+        } catch (e) {
+          console.warn("Error checking remote tracks:", e);
+        }
+      } else {
+        results = await invoke<TrackExistStatus[]>("check_tracks_exist", {
+          targetDir: downloadFolder,
+          tracks: payload
+        });
+      }
+
+      const nextMap = { ...existingMap };
+      for (const r of results) {
+        if (r.id) nextMap[r.id] = { exists: r.exists, matched_file: r.matched_file };
+        nextMap[r.title] = { exists: r.exists, matched_file: r.matched_file };
+      }
+      existingMap = nextMap;
+    } catch (err) {
+      console.warn("checkTracksInLibrary error:", err);
+    } finally {
+      isCheckingDuplicates = false;
+    }
+  }
 
   function setDownloadTarget(target: "local" | "remote") {
     downloadTarget = target;
@@ -127,6 +193,16 @@
     } catch (_) {}
     if (target === "remote" && !remotePcIp.trim()) {
       showRemoteModal = true;
+    }
+    if (searchResults.length > 0) {
+      checkTracksInLibrary(searchResults.map(r => ({ id: r.id, title: r.title, uploader: r.uploader })));
+    }
+    if (currentPreview) {
+      if (currentPreview.is_playlist && currentPreview.playlist_items?.length) {
+        checkTracksInLibrary(currentPreview.playlist_items.map((pi, idx) => ({ id: `pl_${idx}`, title: pi.title })));
+      } else {
+        checkTracksInLibrary([{ id: "preview_single", title: currentPreview.title, uploader: currentPreview.uploader }]);
+      }
     }
   }
 
@@ -312,6 +388,12 @@
         selectedMode = "audio";
         selectedQuality = "mp3";
       }
+
+      if (data.is_playlist && data.playlist_items?.length) {
+        checkTracksInLibrary(data.playlist_items.map((pi, idx) => ({ id: `pl_${idx}`, title: pi.title })));
+      } else if (!data.is_playlist) {
+        checkTracksInLibrary([{ id: "preview_single", title: data.title, uploader: data.uploader }]);
+      }
     } catch (err: any) {
       errorMessage = err?.toString() || "Error al obtener información del enlace.";
     } finally {
@@ -341,6 +423,9 @@
         results = await invoke<SearchResult[]>("search_music", { query: q });
       }
       searchResults = results;
+      if (results.length > 0) {
+        checkTracksInLibrary(results.map(r => ({ id: r.id, title: r.title, uploader: r.uploader })));
+      }
       if (results.length === 0) {
         errorMessage = `No se encontraron resultados para "${q}".`;
       }
@@ -398,40 +483,67 @@
       await handleInspectUrl();
     }
 
-    if (downloadTarget === "remote") {
-      if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
-        const items = currentPreview.playlist_items;
-        showToast(`Enviando playlist (${items.length} canciones) a PC...`);
-        for (const item of items) {
-          await sendRemoteDownload(item.url, item.title, "audio", "mp3", currentPreview.thumbnail);
-        }
+    // Caso: Playlist completa (Liked Music, YouTube Playlist)
+    if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
+      const allItems = currentPreview.playlist_items;
+      // Filtrar sólo las canciones que no existen en la biblioteca
+      const newItems = allItems.filter((item, idx) => {
+        const st = existingMap[`pl_${idx}`] || existingMap[item.title];
+        return !st?.exists;
+      });
+      const skippedCount = allItems.length - newItems.length;
+
+      if (newItems.length === 0) {
+        showToast(`✓ ¡Todas las ${allItems.length} canciones ya están en tu biblioteca!`);
         return;
       }
 
-      const title = currentPreview?.title || "recurso_multimedia";
-      const thumb = currentPreview?.thumbnail || null;
+      if (downloadTarget === "remote") {
+        if (skippedCount > 0) {
+          showToast(`Omitiendo ${skippedCount} ya descargadas. Enviando ${newItems.length} nuevas a PC...`);
+        } else {
+          showToast(`Enviando playlist (${newItems.length} canciones) a PC...`);
+        }
+        for (const item of newItems) {
+          await sendRemoteDownload(item.url, item.title, "audio", "mp3", currentPreview.thumbnail);
+        }
+        return;
+      } else {
+        if (skippedCount > 0) {
+          showToast(`Omitiendo ${skippedCount} ya descargadas. Descargando ${newItems.length} nuevas...`);
+        } else {
+          showToast(`Descargando playlist (${newItems.length} pistas)...`);
+        }
+        for (const item of newItems) {
+          triggerSingleDownload(item.url, item.title, currentPreview.thumbnail);
+          await new Promise((r) => setTimeout(r, 600));
+        }
+        return;
+      }
+    }
+
+    // Caso: Descarga individual
+    const title = currentPreview?.title || "recurso_multimedia";
+    const thumb = currentPreview?.thumbnail || null;
+    const isSingleExisting = existingMap["preview_single"]?.exists || existingMap[title]?.exists;
+    if (isSingleExisting) {
+      showToast(`ℹ️ Pista ya existente en tu biblioteca. Verificando...`);
+    }
+
+    if (downloadTarget === "remote") {
       await sendRemoteDownload(raw, title, selectedMode, selectedQuality, thumb);
       return;
     }
 
-    // Si es una playlist, descargar todos los elementos detectados secuencialmente
-    if (currentPreview?.is_playlist && currentPreview.playlist_items?.length) {
-      const items = currentPreview.playlist_items;
-      showToast(`Descargando playlist (${items.length} pistas)...`);
-      for (const item of items) {
-        triggerSingleDownload(item.url, item.title, currentPreview.thumbnail);
-        await new Promise((r) => setTimeout(r, 600));
-      }
-      return;
-    }
-
-    const title = currentPreview?.title || "recurso_multimedia";
-    const thumb = currentPreview?.thumbnail || null;
     triggerSingleDownload(raw, title, thumb);
   }
 
   function handleSearchDownload(item: SearchResult, mode: "audio" | "video") {
     const quality = mode === "audio" ? "mp3" : "best";
+    const isSongInLib = existingMap[item.id]?.exists || existingMap[item.title]?.exists;
+    if (isSongInLib && mode === "audio") {
+      showToast(`ℹ️ Esta pista ya existe en tu biblioteca. Verificando...`);
+    }
     if (downloadTarget === "remote") {
       sendRemoteDownload(item.url, item.title, mode, quality, item.thumbnail);
     } else {
@@ -549,9 +661,19 @@
           item.errorMsg = payload.filename;
         }
         if (payload.status === "finished") {
+          const rawTitle = item.title.replace(/^\[🖥️ PC\]\s*/, "");
+          existingMap = {
+            ...existingMap,
+            [item.url]: { exists: true, matched_file: payload.output_path },
+            [rawTitle]: { exists: true, matched_file: payload.output_path }
+          };
           saveHistory();
           const shortTitle = item.title.length > 35 ? item.title.substring(0, 35) + "..." : item.title;
-          showToast(`✓ Descarga completada: ${shortTitle}`);
+          if (payload.speed === "Existente" || payload.filename?.includes("omitida")) {
+            showToast(`ℹ️ Pista ya existente en tu biblioteca (omitida): ${shortTitle}`);
+          } else {
+            showToast(`✓ Descarga completada: ${shortTitle}`);
+          }
         } else if (payload.status === "error") {
           saveHistory();
           showToast(`✗ Error al descargar: ${item.title}`);
@@ -761,40 +883,97 @@
 
           <!-- Media Preview Card -->
           {#if currentPreview}
-            <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded-lg flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-              {#if currentPreview.thumbnail}
-                <img
-                  src={currentPreview.thumbnail}
-                  alt="Thumbnail"
-                  class="w-full sm:w-28 h-32 sm:h-20 object-cover rounded bg-black border border-[#27272a]"
-                />
-              {/if}
-              <div class="flex-1 min-w-0 space-y-1 w-full">
-                <div class="flex items-center gap-2">
-                  {#if currentPreview.is_playlist}
-                    <ListMusic class="w-4 h-4 text-white shrink-0" />
-                  {/if}
-                  <h2 class="text-xs sm:text-sm font-bold text-white truncate" title={currentPreview.title}>
-                    {currentPreview.title}
-                  </h2>
-                </div>
-                <div class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[#71717a]">
-                  {#if currentPreview.is_playlist}
-                    <span class="text-white font-medium bg-[#18181b] px-2 py-0.5 rounded border border-[#3f3f46]">
-                      Playlist: {currentPreview.playlist_count || currentPreview.playlist_items?.length} items
-                    </span>
-                  {/if}
-                  {#if currentPreview.uploader}
-                    <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
-                  {/if}
-                  {#if currentPreview.duration}
-                    <span>duración: <strong class="text-[#d4d4d8] font-normal">{formatDuration(currentPreview.duration)}</strong></span>
-                  {/if}
-                  {#if currentPreview.is_direct_image}
-                    <span class="text-white font-semibold">[imagen detectada]</span>
-                  {/if}
+            <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded-lg flex flex-col gap-3">
+              <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                {#if currentPreview.thumbnail}
+                  <img
+                    src={currentPreview.thumbnail}
+                    alt="Thumbnail"
+                    class="w-full sm:w-28 h-32 sm:h-20 object-cover rounded bg-black border border-[#27272a]"
+                  />
+                {/if}
+                <div class="flex-1 min-w-0 space-y-1.5 w-full">
+                  <div class="flex items-center gap-2">
+                    {#if currentPreview.is_playlist}
+                      <ListMusic class="w-4 h-4 text-white shrink-0" />
+                    {/if}
+                    <h2 class="text-xs sm:text-sm font-bold text-white truncate" title={currentPreview.title}>
+                      {currentPreview.title}
+                    </h2>
+                  </div>
+                  <div class="flex flex-wrap gap-x-3 gap-y-1.5 text-[11px] text-[#71717a] items-center">
+                    {#if currentPreview.is_playlist}
+                      {@const totalItems = currentPreview.playlist_items?.length || currentPreview.playlist_count || 0}
+                      {@const existingCount = currentPreview.playlist_items?.filter((it, idx) => (existingMap[`pl_${idx}`]?.exists || existingMap[it.title]?.exists)).length || 0}
+                      {@const pendingCount = Math.max(0, totalItems - existingCount)}
+                      <span class="text-white font-medium bg-[#18181b] px-2 py-0.5 rounded border border-[#3f3f46]">
+                        Playlist: {totalItems} items
+                      </span>
+                      {#if existingCount > 0}
+                        <span class="text-emerald-400 font-mono bg-emerald-950/70 border border-emerald-800/80 px-2 py-0.5 rounded text-[10px] flex items-center gap-1">
+                          <Check class="w-3 h-3 stroke-[2.5]" />
+                          {existingCount} en biblioteca
+                        </span>
+                        <span class="text-[#d4d4d8] font-mono bg-[#18181b] border border-[#3f3f46] px-2 py-0.5 rounded text-[10px]">
+                          {pendingCount} pendientes
+                        </span>
+                      {/if}
+                      {#if currentPreview.playlist_items?.length}
+                        <button
+                          type="button"
+                          onclick={() => showPlaylistItemsDrawer = !showPlaylistItemsDrawer}
+                          class="text-[10px] text-[#a1a1aa] hover:text-white bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] px-2 py-0.5 rounded transition-all cursor-pointer flex items-center gap-1"
+                        >
+                          <span>{showPlaylistItemsDrawer ? "ocultar pistas" : "ver pistas"}</span>
+                          <ChevronDown class={`w-3 h-3 transition-transform ${showPlaylistItemsDrawer ? "rotate-180" : ""}`} />
+                        </button>
+                      {/if}
+                    {:else}
+                      {@const singleExisting = existingMap["preview_single"]?.exists || existingMap[currentPreview.title]?.exists}
+                      {#if singleExisting}
+                        <span class="text-emerald-400 font-mono bg-emerald-950/70 border border-emerald-800/80 px-2 py-0.5 rounded text-[10px] flex items-center gap-1">
+                          <Check class="w-3 h-3 stroke-[2.5]" />
+                          Ya en tu biblioteca
+                        </span>
+                      {/if}
+                    {/if}
+                    {#if currentPreview.uploader}
+                      <span>autor: <strong class="text-[#d4d4d8] font-normal">{currentPreview.uploader}</strong></span>
+                    {/if}
+                    {#if currentPreview.duration}
+                      <span>duración: <strong class="text-[#d4d4d8] font-normal">{formatDuration(currentPreview.duration)}</strong></span>
+                    {/if}
+                    {#if currentPreview.is_direct_image}
+                      <span class="text-white font-semibold">[imagen detectada]</span>
+                    {/if}
+                  </div>
                 </div>
               </div>
+
+              <!-- Drawer de pistas de playlist desplegable -->
+              {#if currentPreview.is_playlist && showPlaylistItemsDrawer && currentPreview.playlist_items?.length}
+                <div class="border-t border-[#27272a] pt-2 space-y-1 max-h-56 overflow-y-auto pr-1">
+                  {#each currentPreview.playlist_items as pItem, pIdx}
+                    {@const isItemInLib = existingMap[`pl_${pIdx}`]?.exists || existingMap[pItem.title]?.exists}
+                    <div class="flex items-center justify-between text-xs py-1 px-2 rounded bg-[#10121a]/80 hover:bg-[#18181b] border border-[#27272a]/60">
+                      <div class="flex items-center gap-2 min-w-0 flex-1 mr-2">
+                        <span class="text-[10px] font-mono text-[#71717a] w-5 shrink-0">{pIdx + 1}.</span>
+                        <span class="text-white truncate" title={pItem.title}>{pItem.title}</span>
+                      </div>
+                      {#if isItemInLib}
+                        <span class="text-[9px] font-mono text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded flex items-center gap-1 shrink-0">
+                          <Check class="w-2.5 h-2.5 stroke-[3]" />
+                          En biblioteca
+                        </span>
+                      {:else}
+                        <span class="text-[9px] font-mono text-[#71717a] bg-[#18181b] px-1.5 py-0.5 rounded shrink-0">
+                          Pendiente
+                        </span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/if}
 
@@ -873,17 +1052,37 @@
             <button
               onclick={handleDownload}
               disabled={!urlInput.trim() || isSendingRemote}
-              class="w-full py-3 rounded-lg bg-white hover:bg-[#e4e4e7] active:scale-[0.98] disabled:opacity-20 text-black font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-white/5"
+              class={`w-full py-3 rounded-lg font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg active:scale-[0.98] disabled:opacity-20 ${
+                isPlaylistAllInLib || isSingleInLib
+                  ? "bg-emerald-950/80 border border-emerald-700 text-emerald-300 hover:bg-emerald-900/90 shadow-emerald-950/20"
+                  : "bg-white hover:bg-[#e4e4e7] text-black shadow-white/5"
+              }`}
             >
               {#if isSendingRemote}
-                <Loader2 class="w-4 h-4 animate-spin text-black" />
+                <Loader2 class="w-4 h-4 animate-spin text-inherit" />
                 <span>enviando a pc...</span>
               {:else if downloadTarget === "remote"}
                 <Monitor class="w-4 h-4 stroke-[2.5]" />
-                <span>{currentPreview?.is_playlist ? `enviar playlist a pc (navidrome)` : 'enviar orden a pc (navidrome)'}</span>
+                <span>
+                  {currentPreview?.is_playlist
+                    ? (isPlaylistAllInLib
+                        ? 'playlist completa en pc (0 pendientes)'
+                        : `enviar nuevas (${pendingPlaylistCount}) a pc`)
+                    : (isSingleInLib ? 'ya en biblioteca pc (re-enviar)' : 'enviar orden a pc (navidrome)')}
+                </span>
               {:else}
-                <Download class="w-4 h-4 stroke-[2.5]" />
-                <span>{currentPreview?.is_playlist ? `descargar playlist (${currentPreview.playlist_items?.length || 'todas'})` : 'ejecutar descarga'}</span>
+                {#if isPlaylistAllInLib || isSingleInLib}
+                  <Check class="w-4 h-4 stroke-[2.5] text-emerald-400" />
+                {:else}
+                  <Download class="w-4 h-4 stroke-[2.5]" />
+                {/if}
+                <span>
+                  {currentPreview?.is_playlist
+                    ? (isPlaylistAllInLib
+                        ? 'playlist ya en biblioteca (0 pendientes)'
+                        : `descargar nuevas (${pendingPlaylistCount})`)
+                    : (isSingleInLib ? 'ya en biblioteca (descargar de nuevo)' : 'ejecutar descarga')}
+                </span>
               {/if}
             </button>
           </div>
@@ -999,9 +1198,17 @@
                           </div>
                         {/if}
                         <div class="min-w-0 flex-1 space-y-0.5">
-                          <p class="text-xs font-bold text-white line-clamp-2 sm:truncate" title={item.title}>
-                            {item.title}
-                          </p>
+                          <div class="flex items-center gap-2">
+                            <p class="text-xs font-bold text-white line-clamp-2 sm:truncate" title={item.title}>
+                              {item.title}
+                            </p>
+                            {#if existingMap[item.id]?.exists || existingMap[item.title]?.exists}
+                              <span class="text-[9px] font-mono bg-emerald-950/70 border border-emerald-800/80 text-emerald-400 px-1.5 py-0.5 rounded flex items-center gap-1 shrink-0" title={`Ya descargado: ${existingMap[item.id]?.matched_file || existingMap[item.title]?.matched_file || 'En biblioteca'}`}>
+                                <Check class="w-2.5 h-2.5 stroke-[3]" />
+                                En biblioteca
+                              </span>
+                            {/if}
+                          </div>
                           <div class="flex items-center gap-2 text-[11px] text-[#71717a]">
                             {#if item.uploader}
                               <span class="truncate max-w-[140px] sm:max-w-[220px] text-[#a1a1aa] font-medium">{item.uploader}</span>
@@ -1051,13 +1258,23 @@
                             </button>
                           {/if}
                         {:else}
+                          {@const isSongInLib = existingMap[item.id]?.exists || existingMap[item.title]?.exists}
                           <button
                             onclick={() => handleSearchDownload(item, "audio")}
                             disabled={isSendingRemote}
-                            class="flex items-center gap-1.5 text-xs bg-white hover:bg-[#e4e4e7] active:scale-95 text-black font-bold px-3 py-1.5 rounded-md transition-all cursor-pointer shadow-sm disabled:opacity-40"
-                            title={downloadTarget === "remote" ? "Enviar MP3 a tu PC (Navidrome)" : "Descargar MP3 con ID3 tags y carátula para Navidrome"}
+                            class={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-md transition-all cursor-pointer shadow-sm disabled:opacity-40 active:scale-95 ${
+                              isSongInLib
+                                ? "bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-700/60"
+                                : "bg-white hover:bg-[#e4e4e7] text-black"
+                            }`}
+                            title={isSongInLib
+                              ? "Esta pista ya está en tu biblioteca. Clic para volver a descargar o comprobar"
+                              : (downloadTarget === "remote" ? "Enviar MP3 a tu PC (Navidrome)" : "Descargar MP3 con ID3 tags y carátula para Navidrome")}
                           >
-                            {#if downloadTarget === "remote"}
+                            {#if isSongInLib}
+                              <Check class="w-3.5 h-3.5 stroke-[2.5] text-emerald-400" />
+                              <span>{downloadTarget === "remote" ? "En PC" : "En biblioteca"}</span>
+                            {:else if downloadTarget === "remote"}
                               <Monitor class="w-3.5 h-3.5 stroke-[2.5]" />
                               <span>MP3</span>
                             {:else}
