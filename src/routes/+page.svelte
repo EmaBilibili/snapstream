@@ -327,7 +327,19 @@
     searchResults = [];
 
     try {
-      const results = await invoke<SearchResult[]>("search_music", { query: q });
+      let results: SearchResult[];
+      if (downloadTarget === "remote" && remotePcIp.trim()) {
+        try {
+          results = await invoke<SearchResult[]>("search_remote_music", {
+            pcIp: remotePcIp.trim(),
+            query: q
+          });
+        } catch {
+          results = await invoke<SearchResult[]>("search_music", { query: q });
+        }
+      } else {
+        results = await invoke<SearchResult[]>("search_music", { query: q });
+      }
       searchResults = results;
       if (results.length === 0) {
         errorMessage = `No se encontraron resultados para "${q}".`;

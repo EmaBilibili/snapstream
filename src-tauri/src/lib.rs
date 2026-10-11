@@ -891,6 +891,39 @@ async fn get_remote_media_info(pc_ip: String, url: String) -> Result<MediaMetada
     }
 }
 
+#[tauri::command]
+async fn search_remote_music(pc_ip: String, query: String) -> Result<Vec<SearchResult>, String> {
+    let target = resolve_target_url(&pc_ip, "api/search");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let payload = serde_json::json!({ "query": query });
+
+    let resp = client
+        .post(&target)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Error buscando en la PC: {}", e))?;
+
+    if resp.status().is_success() {
+        let results = resp
+            .json::<Vec<SearchResult>>()
+            .await
+            .map_err(|e| format!("Error procesando resultados: {}", e))?;
+        Ok(results)
+    } else {
+        let err_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "Error desconocido".into());
+        Err(format!("PC respondió con error: {}", err_text))
+    }
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_embedded_server(app: AppHandle, port: u16) {
     std::thread::spawn(move || {
@@ -1027,6 +1060,42 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                 }
             }
 
+            if (url == "/api/search" || url.starts_with("/api/search?")) && (method == tiny_http::Method::Post || method == tiny_http::Method::Get) {
+                let target_query = if method == tiny_http::Method::Post {
+                    let mut content = String::new();
+                    let _ = request.as_reader().read_to_string(&mut content);
+                    serde_json::from_str::<serde_json::Value>(&content)
+                        .ok()
+                        .and_then(|v| v["query"].as_str().map(|s| s.to_string()))
+                } else {
+                    url.split("query=").nth(1).map(|q| q.to_string())
+                };
+
+                if let Some(q) = target_query {
+                    let res = tauri::async_runtime::block_on(search_music(q));
+                    match res {
+                        Ok(results) => {
+                            let body = serde_json::to_string(&results).unwrap_or_default();
+                            let response = tiny_http::Response::from_string(body)
+                                .with_status_code(200)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                        Err(e) => {
+                            let body = serde_json::json!({ "error": e }).to_string();
+                            let response = tiny_http::Response::from_string(body)
+                                .with_status_code(500)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                                .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let response = tiny_http::Response::from_string(r#"{"error": "Ruta no encontrada"}"#)
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
@@ -1064,7 +1133,8 @@ pub fn run() {
             get_server_info,
             ping_remote_server,
             send_remote_download,
-            get_remote_media_info
+            get_remote_media_info,
+            search_remote_music
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
