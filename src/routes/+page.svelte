@@ -136,7 +136,7 @@
   let copiedServerIp = $state(false);
   let isSendingRemote = $state(false);
 
-  const currentAppVersion = "v0.1.0";
+  const currentAppVersion = "v0.1.1";
   let showUpdateModal = $state(false);
   let latestRelease = $state<ReleaseInfo | null>(null);
   let updateError = $state<string | null>(null);
@@ -551,6 +551,7 @@
         }
         for (const item of newItems) {
           await sendRemoteDownload(item.url, item.title, "audio", "mp3", currentPreview.thumbnail);
+          await new Promise((r) => setTimeout(r, 500));
         }
         return;
       } else {
@@ -629,6 +630,7 @@
       await invoke("start_download", {
         id,
         url,
+        title,
         outputDir: downloadFolder,
         mode,
         quality,
@@ -643,6 +645,15 @@
         showToast(`✗ Error: ${err?.toString() || "fallo al iniciar descarga"}`);
       }
     }
+  }
+
+  function searchAlternative(title: string) {
+    const clean = title.replace(/^\[🖥️ PC\]\s*/, "").trim();
+    activeTab = "search";
+    searchQuery = clean;
+    handleSearch();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    showToast(`Buscando alternativa: ${clean.length > 30 ? clean.substring(0, 30) + "..." : clean}`);
   }
 
   function clearHistory() {
@@ -769,12 +780,14 @@
           const shortTitle = item.title.length > 35 ? item.title.substring(0, 35) + "..." : item.title;
           if (payload.speed === "Existente" || payload.filename?.includes("omitida")) {
             showToast(`ℹ️ Pista ya existente en tu biblioteca (omitida): ${shortTitle}`);
+          } else if (payload.speed === "Reemplazo" || payload.filename?.includes("reemplazo")) {
+            showToast(`✓ Descarga completada (reemplazo automático): ${shortTitle}`);
           } else {
             showToast(`✓ Descarga completada: ${shortTitle}`);
           }
         } else if (payload.status === "error") {
           saveHistory();
-          showToast(`✗ Error al descargar: ${item.title}`);
+          showToast(`✗ ${payload.filename || ('Error al descargar: ' + item.title)}`);
         }
       }
     });
@@ -796,7 +809,7 @@
         </div>
         <div class="flex items-center gap-2 min-w-0">
           <span class="text-xs sm:text-sm font-bold tracking-wider text-white">snapstream</span>
-          <span class="text-[10px] text-[#71717a] font-normal px-1.5 py-0.5 rounded bg-[#18181b] border border-[#27272a]">v0.1.0</span>
+          <span class="text-[10px] text-[#71717a] font-normal px-1.5 py-0.5 rounded bg-[#18181b] border border-[#27272a]">v0.1.1</span>
         </div>
       </div>
 
@@ -1583,11 +1596,22 @@
                         <span>• ETA: {item.eta}</span>
                       {/if}
                     </div>
+                    {#if item.status === "error" && item.errorMsg}
+                      <p class="text-[11px] text-red-400 mt-1 flex items-center gap-1 font-mono">
+                        <AlertTriangle class="w-3 h-3 text-red-400 shrink-0" />
+                        <span class="truncate">{item.errorMsg}</span>
+                      </p>
+                    {/if}
                   </div>
                 </div>
 
                 <div class="flex items-center gap-2 shrink-0 text-xs">
-                  {#if item.status === "downloading"}
+                  {#if item.status === "queued"}
+                    <div class="flex items-center gap-1 text-[#a1a1aa] text-[11px]">
+                      <Loader2 class="w-3.5 h-3.5 animate-spin" />
+                      <span>en cola</span>
+                    </div>
+                  {:else if item.status === "downloading"}
                     <span class="font-bold text-white font-mono">{item.percent.toFixed(0)}%</span>
                   {:else if item.status === "processing"}
                     <div class="flex items-center gap-1 text-white">
@@ -1596,6 +1620,11 @@
                     </div>
                   {:else if item.status === "finished"}
                     <div class="flex items-center gap-1.5">
+                      {#if item.speed === "Reemplazo"}
+                        <span class="text-[10px] text-amber-300 font-mono bg-amber-950/60 border border-amber-800/80 px-2 py-0.5 rounded flex items-center gap-1" title="Se descargó una versión alternativa activa de YouTube">
+                          🔄 Reemplazo
+                        </span>
+                      {/if}
                       {#if item.outputPath === "~/navidrome/music"}
                         <span class="text-[10px] text-emerald-400 font-mono bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded">
                           Navidrome PC
@@ -1615,7 +1644,24 @@
                       </div>
                     </div>
                   {:else if item.status === "error"}
-                    <span class="text-[11px] text-[#fca5a5]" title={item.errorMsg}>error</span>
+                    <div class="flex items-center gap-1.5">
+                      <button
+                        onclick={() => searchAlternative(item.title)}
+                        class="flex items-center gap-1 text-[11px] bg-sky-950/80 hover:bg-sky-900 border border-sky-700/80 text-sky-200 px-2 py-1 rounded-md transition-colors cursor-pointer font-medium"
+                        title="Buscar versión alternativa en YouTube"
+                      >
+                        <Search class="w-3 h-3 text-sky-400" />
+                        <span>Buscar alternativa</span>
+                      </button>
+                      <button
+                        onclick={() => triggerSingleDownload(item.url, item.title, item.thumbnail, item.mode, item.quality)}
+                        class="flex items-center gap-1 text-[11px] bg-red-950/60 hover:bg-red-900/80 border border-red-800/80 text-red-200 px-2 py-1 rounded-md transition-colors cursor-pointer"
+                        title="Reintentar descarga"
+                      >
+                        <AlertTriangle class="w-3 h-3 text-red-400" />
+                        <span>Reintentar</span>
+                      </button>
+                    </div>
                   {/if}
                 </div>
               </div>

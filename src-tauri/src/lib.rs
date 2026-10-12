@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Semaphore;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{
@@ -634,11 +636,20 @@ async fn open_path_in_file_manager(path: String) -> Result<(), String> {
     }
 }
 
+static DOWNLOAD_SEMAPHORE: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+
+fn get_download_semaphore() -> Arc<Semaphore> {
+    DOWNLOAD_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(3)))
+        .clone()
+}
+
 #[tauri::command]
 async fn start_download(
     app: AppHandle,
     id: String,
     url: String,
+    title: Option<String>,
     output_dir: String,
     mode: String,
     quality: String,
@@ -713,32 +724,83 @@ async fn start_download(
         return Ok(id);
     }
 
-    // Caso: Video o Audio
+    // Caso: Video o Audio (Control de Concurrencia + Auto-Fallback + Diagnóstico)
     let ytdlp_path = get_ytdlp_cmd();
-    std::thread::spawn(move || {
-        let mut cmd = Command::new(&ytdlp_path);
-        let output_template = if mode == "audio" {
-            format!("{}/%(artist,uploader)s - %(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
-        } else {
-            format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
-        };
+    let track_title = title.clone();
 
+    tokio::spawn(async move {
+        let _ = app.emit(
+            "download-progress",
+            DownloadProgress {
+                id: download_id.clone(),
+                percent: 0.0,
+                speed: "En cola...".into(),
+                eta: "".into(),
+                status: "queued".into(),
+                filename: None,
+                output_path: None,
+            },
+        );
+
+        let _permit = get_download_semaphore().acquire_owned().await.ok();
+
+        let app_clone = app.clone();
+        let dl_id = download_id.clone();
+        let out_dir = resolved_output_dir.clone();
+        let q = quality.clone();
+        let m = mode.clone();
+        let u = clean_url.clone();
+        let t = track_title.clone();
+        let yp = ytdlp_path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            execute_ytdlp_with_fallback(app_clone, dl_id, u, t, out_dir, m, q, yp);
+        })
+        .await
+        .ok();
+    });
+
+    Ok(id)
+}
+
+fn execute_ytdlp_with_fallback(
+    app: AppHandle,
+    download_id: String,
+    clean_url: String,
+    track_title: Option<String>,
+    resolved_output_dir: String,
+    mode: String,
+    quality: String,
+    ytdlp_path: std::path::PathBuf,
+) {
+    let output_template = if mode == "audio" {
+        format!("{}/%(artist,uploader)s - %(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
+    } else {
+        format!("{}/%(title)s.%(ext)s", resolved_output_dir.trim_end_matches('/'))
+    };
+
+    let build_command = |target_url: &str, is_fallback: bool| -> Command {
+        let mut cmd = Command::new(&ytdlp_path);
         cmd.args(["--newline", "-o", &output_template, "--no-overwrites"]);
 
         if which::which("node").is_ok() {
             cmd.args(["--js-runtimes", "node"]);
         }
 
-        let is_private_playlist = clean_url.contains("list=LM") || clean_url.contains("list=LL") || clean_url.contains("list=WL");
-        if is_private_playlist {
-            let browser_cookie = get_browser_cookie_arg();
-            if let Some(ref browser) = browser_cookie {
-                cmd.args(["--cookies-from-browser", browser]);
+        if !is_fallback {
+            let is_private_playlist = target_url.contains("list=LM") || target_url.contains("list=LL") || target_url.contains("list=WL");
+            if is_private_playlist {
+                let browser_cookie = get_browser_cookie_arg();
+                if let Some(ref browser) = browser_cookie {
+                    cmd.args(["--cookies-from-browser", browser]);
+                }
             }
-        }
 
-        if clean_url.contains("/playlist?list=") || clean_url.contains("list=LM") || clean_url.contains("list=LL") {
-            cmd.arg("--yes-playlist");
+            if target_url.contains("/playlist?list=") || target_url.contains("list=LM") || target_url.contains("list=LL") {
+                cmd.arg("--yes-playlist");
+            } else {
+                cmd.arg("--no-playlist");
+            }
         } else {
             cmd.arg("--no-playlist");
         }
@@ -778,140 +840,301 @@ async fn start_download(
             cmd.args(["--merge-output-format", "mp4"]);
         }
 
-        cmd.arg(&clean_url);
+        cmd.arg(target_url);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        cmd
+    };
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
+    let mut cmd = build_command(&clean_url, false);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.emit(
+                "download-progress",
+                DownloadProgress {
+                    id: download_id,
+                    percent: 0.0,
+                    speed: "".into(),
+                    eta: "".into(),
+                    status: "error".into(),
+                    filename: Some(format!("Error iniciando yt-dlp: {}", e)),
+                    output_path: None,
+                },
+            );
+            return;
+        }
+    };
+
+    let mut final_file = None;
+    let mut already_downloaded = false;
+
+    let stderr_handle = if let Some(stderr) = child.stderr.take() {
+        Some(std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            reader.lines().map_while(Result::ok).collect::<Vec<String>>().join("\n")
+        }))
+    } else {
+        None
+    };
+
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if line.contains("has already been downloaded") || line.contains("already in target format") {
+                already_downloaded = true;
+                if let Some(idx) = line.find("[download] ") {
+                    let rest = &line[idx + 11..];
+                    if let Some(end_idx) = rest.find(" has already been downloaded") {
+                        final_file = Some(rest[..end_idx].trim().to_string());
+                    }
+                }
+            } else if line.contains("[download] Destination:") {
+                let parts: Vec<&str> = line.split("[download] Destination:").collect();
+                if parts.len() > 1 {
+                    final_file = Some(parts[1].trim().to_string());
+                }
+            } else if line.contains("[Merger] Merging formats into") {
+                let parts: Vec<&str> = line.split("[Merger] Merging formats into").collect();
+                if parts.len() > 1 {
+                    let f = parts[1].trim().trim_matches('"').to_string();
+                    final_file = Some(f);
+                }
+            } else if line.starts_with("[download]") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let mut percent = 0.0;
+                let mut speed = String::new();
+                let mut eta = String::new();
+
+                for (i, p) in parts.iter().enumerate() {
+                    if p.ends_with('%') {
+                        if let Ok(val) = p.trim_end_matches('%').parse::<f32>() {
+                            percent = val;
+                        }
+                    }
+                    if *p == "at" && i + 1 < parts.len() {
+                        speed = parts[i + 1].to_string();
+                    }
+                    if *p == "ETA" && i + 1 < parts.len() {
+                        eta = parts[i + 1].to_string();
+                    }
+                }
+
                 let _ = app.emit(
                     "download-progress",
                     DownloadProgress {
                         id: download_id.clone(),
-                        percent: 0.0,
-                        speed: "".into(),
-                        eta: "".into(),
-                        status: "error".into(),
-                        filename: Some(e.to_string()),
+                        percent,
+                        speed,
+                        eta,
+                        status: "downloading".into(),
+                        filename: None,
                         output_path: None,
                     },
                 );
-                return;
+            } else if line.starts_with("[ExtractAudio]") || line.starts_with("[Merger]") {
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        id: download_id.clone(),
+                        percent: 99.0,
+                        speed: "".into(),
+                        eta: "".into(),
+                        status: "processing".into(),
+                        filename: None,
+                        output_path: None,
+                    },
+                );
             }
-        };
+        }
+    }
 
-        let mut final_file = None;
-        let mut already_downloaded = false;
+    let status = child.wait();
+    let mut success = status.as_ref().map(|s| s.success()).unwrap_or(false);
+    let mut used_fallback = false;
+    let mut last_stderr = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
 
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                if line.contains("has already been downloaded") || line.contains("already in target format") {
-                    already_downloaded = true;
-                    if let Some(idx) = line.find("[download] ") {
-                        let rest = &line[idx + 11..];
-                        if let Some(end_idx) = rest.find(" has already been downloaded") {
-                            final_file = Some(rest[..end_idx].trim().to_string());
-                        }
-                    }
-                } else if line.contains("[download] Destination:") {
-                    let parts: Vec<&str> = line.split("[download] Destination:").collect();
-                    if parts.len() > 1 {
-                        final_file = Some(parts[1].trim().to_string());
-                    }
-                } else if line.contains("[Merger] Merging formats into") {
-                    let parts: Vec<&str> = line.split("[Merger] Merging formats into").collect();
-                    if parts.len() > 1 {
-                        let f = parts[1].trim().trim_matches('"').to_string();
-                        final_file = Some(f);
-                    }
-                } else if line.starts_with("[download]") {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    let mut percent = 0.0;
-                    let mut speed = String::new();
-                    let mut eta = String::new();
+    // 2. Si falló: Intentar AUTO-FALLBACK buscando el título en YouTube
+    if !success {
+        if let Some(ref raw_title) = track_title {
+            let clean_t = raw_title.replace('"', "").replace('\'', "").trim().to_string();
+            if !clean_t.is_empty() && clean_t != "Sin título" {
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        id: download_id.clone(),
+                        percent: 10.0,
+                        speed: "Buscando...".into(),
+                        eta: "".into(),
+                        status: "downloading".into(),
+                        filename: Some("Buscando alternativa activa en YouTube...".into()),
+                        output_path: None,
+                    },
+                );
 
-                    for (i, p) in parts.iter().enumerate() {
-                        if p.ends_with('%') {
-                            if let Ok(val) = p.trim_end_matches('%').parse::<f32>() {
-                                percent = val;
+                let fallback_query = format!("ytsearch1:{} audio", clean_t);
+                let mut fb_cmd = build_command(&fallback_query, true);
+
+                if let Ok(mut fb_child) = fb_cmd.spawn() {
+                    let fb_stderr_handle = if let Some(fb_err) = fb_child.stderr.take() {
+                        Some(std::thread::spawn(move || {
+                            let reader = BufReader::new(fb_err);
+                            reader.lines().map_while(Result::ok).collect::<Vec<String>>().join("\n")
+                        }))
+                    } else {
+                        None
+                    };
+
+                    if let Some(fb_stdout) = fb_child.stdout.take() {
+                        let reader = BufReader::new(fb_stdout);
+                        for line in reader.lines().map_while(Result::ok) {
+                            if line.contains("has already been downloaded") || line.contains("already in target format") {
+                                already_downloaded = true;
+                                if let Some(idx) = line.find("[download] ") {
+                                    let rest = &line[idx + 11..];
+                                    if let Some(end_idx) = rest.find(" has already been downloaded") {
+                                        final_file = Some(rest[..end_idx].trim().to_string());
+                                    }
+                                }
+                            } else if line.contains("[download] Destination:") {
+                                let parts: Vec<&str> = line.split("[download] Destination:").collect();
+                                if parts.len() > 1 {
+                                    final_file = Some(parts[1].trim().to_string());
+                                }
+                            } else if line.contains("[Merger] Merging formats into") {
+                                let parts: Vec<&str> = line.split("[Merger] Merging formats into").collect();
+                                if parts.len() > 1 {
+                                    let f = parts[1].trim().trim_matches('"').to_string();
+                                    final_file = Some(f);
+                                }
+                            } else if line.starts_with("[download]") {
+                                let parts: Vec<&str> = line.split_whitespace().collect();
+                                let mut percent = 0.0;
+                                let mut speed = String::new();
+                                let mut eta = String::new();
+
+                                for (i, p) in parts.iter().enumerate() {
+                                    if p.ends_with('%') {
+                                        if let Ok(val) = p.trim_end_matches('%').parse::<f32>() {
+                                            percent = val;
+                                        }
+                                    }
+                                    if *p == "at" && i + 1 < parts.len() {
+                                        speed = parts[i + 1].to_string();
+                                    }
+                                    if *p == "ETA" && i + 1 < parts.len() {
+                                        eta = parts[i + 1].to_string();
+                                    }
+                                }
+
+                                let _ = app.emit(
+                                    "download-progress",
+                                    DownloadProgress {
+                                        id: download_id.clone(),
+                                        percent,
+                                        speed,
+                                        eta,
+                                        status: "downloading".into(),
+                                        filename: Some("Descargando reemplazo...".into()),
+                                        output_path: None,
+                                    },
+                                );
+                            } else if line.starts_with("[ExtractAudio]") || line.starts_with("[Merger]") {
+                                let _ = app.emit(
+                                    "download-progress",
+                                    DownloadProgress {
+                                        id: download_id.clone(),
+                                        percent: 99.0,
+                                        speed: "".into(),
+                                        eta: "".into(),
+                                        status: "processing".into(),
+                                        filename: None,
+                                        output_path: None,
+                                    },
+                                );
                             }
                         }
-                        if *p == "at" && i + 1 < parts.len() {
-                            speed = parts[i + 1].to_string();
-                        }
-                        if *p == "ETA" && i + 1 < parts.len() {
-                            eta = parts[i + 1].to_string();
-                        }
                     }
 
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgress {
-                            id: download_id.clone(),
-                            percent,
-                            speed,
-                            eta,
-                            status: "downloading".into(),
-                            filename: None,
-                            output_path: None,
-                        },
-                    );
-                } else if line.starts_with("[ExtractAudio]") || line.starts_with("[Merger]") {
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgress {
-                            id: download_id.clone(),
-                            percent: 99.0,
-                            speed: "".into(),
-                            eta: "".into(),
-                            status: "processing".into(),
-                            filename: None,
-                            output_path: None,
-                        },
-                    );
+                    if let Ok(fb_stat) = fb_child.wait() {
+                        if fb_stat.success() {
+                            success = true;
+                            used_fallback = true;
+                        } else if let Some(fb_h) = fb_stderr_handle {
+                            if let Ok(err_txt) = fb_h.join() {
+                                if !err_txt.is_empty() {
+                                    last_stderr = err_txt;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
 
-        let status = child.wait();
-        match status {
-            Ok(s) if s.success() => {
-                let out_target = final_file.unwrap_or(resolved_output_dir);
-                let speed_label = if already_downloaded { "Existente".to_string() } else { "".to_string() };
-                let filename_label = if already_downloaded { Some("Pista ya existente (omitida)".to_string()) } else { None };
-                let _ = app.emit(
-                    "download-progress",
-                    DownloadProgress {
-                        id: download_id,
-                        percent: 100.0,
-                        speed: speed_label,
-                        eta: "".into(),
-                        status: "finished".into(),
-                        filename: filename_label,
-                        output_path: Some(out_target),
-                    },
-                );
-            }
-            _ => {
-                let _ = app.emit(
-                    "download-progress",
-                    DownloadProgress {
-                        id: download_id,
-                        percent: 0.0,
-                        speed: "".into(),
-                        eta: "".into(),
-                        status: "error".into(),
-                        filename: Some("Fallo en la descarga".into()),
-                        output_path: None,
-                    },
-                );
-            }
-        }
-    });
+    // 3. Emitir resultado final
+    if success {
+        let out_target = final_file.unwrap_or(resolved_output_dir);
+        let speed_label = if already_downloaded {
+            "Existente".to_string()
+        } else if used_fallback {
+            "Reemplazo".to_string()
+        } else {
+            "".to_string()
+        };
 
-    Ok(id)
+        let filename_label = if already_downloaded {
+            Some("Pista ya existente (omitida)".to_string())
+        } else if used_fallback {
+            Some("Descargada (reemplazo automático encontrado)".to_string())
+        } else {
+            None
+        };
+
+        let _ = app.emit(
+            "download-progress",
+            DownloadProgress {
+                id: download_id,
+                percent: 100.0,
+                speed: speed_label,
+                eta: "".into(),
+                status: "finished".into(),
+                filename: filename_label,
+                output_path: Some(out_target),
+            },
+        );
+    } else {
+        // Diagnóstico descriptivo del motivo del error
+        let err_reason = if last_stderr.contains("Video unavailable") || last_stderr.contains("This video is not available") || last_stderr.contains("This video has been removed") {
+            "Video eliminado o no disponible en YouTube".to_string()
+        } else if last_stderr.contains("Sign in to confirm your age") || last_stderr.contains("Sign in to confirm you’re not a bot") || last_stderr.contains("Private video") {
+            "Restricción de edad (+18) o video privado en YouTube".to_string()
+        } else if last_stderr.contains("not available in your country") || last_stderr.contains("blocked in your country") {
+            "Bloqueo regional por derechos de autor".to_string()
+        } else if last_stderr.contains("HTTP Error 429") || last_stderr.contains("Too Many Requests") {
+            "Límite temporal de peticiones de YouTube (reintentar en breve)".to_string()
+        } else {
+            last_stderr
+                .lines()
+                .find(|l| l.contains("ERROR:"))
+                .map(|l| l.replace("ERROR:", "").trim().to_string())
+                .unwrap_or_else(|| "Fallo en la descarga de YouTube".to_string())
+        };
+
+        let _ = app.emit(
+            "download-progress",
+            DownloadProgress {
+                id: download_id,
+                percent: 0.0,
+                speed: "".into(),
+                eta: "".into(),
+                status: "error".into(),
+                filename: Some(err_reason),
+                output_path: None,
+            },
+        );
+    }
 }
 
 fn get_local_ip() -> String {
@@ -1314,7 +1537,7 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                 let body = serde_json::json!({
                     "status": "ok",
                     "app": "SnapStream",
-                    "version": "0.1.0",
+                    "version": env!("CARGO_PKG_VERSION"),
                     "ip": local_ip,
                     "port": port
                 }).to_string();
@@ -1344,6 +1567,7 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                     };
 
                     let dl_url = payload.url.clone();
+                    let dl_title = payload.title.clone();
                     let dl_mode = payload.mode.clone();
                     let dl_quality = payload.quality.clone();
                     let dl_thumb = payload.thumbnail.clone();
@@ -1354,6 +1578,7 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                             app_clone,
                             dl_id,
                             dl_url,
+                            Some(dl_title),
                             target_dir,
                             dl_mode,
                             dl_quality,
