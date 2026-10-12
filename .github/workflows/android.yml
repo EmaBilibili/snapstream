@@ -127,7 +127,8 @@ jobs:
               $BUILD_TOOLS/apksigner sign --ks snapstream-signer.keystore \
                 --ks-pass pass:snapstream123 --key-pass pass:snapstream123 \
                 --out "$signed_apk" "$apk"
-              echo "✓ APK firmado con éxito: $signed_apk"
+              cp "$signed_apk" "dist-apk/SnapStream-latest.apk"
+              echo "✓ APK firmado con éxito: $signed_apk y SnapStream-latest.apk"
             else
               filename=$(basename "$apk")
               cp "$apk" "dist-apk/SnapStream-${filename}"

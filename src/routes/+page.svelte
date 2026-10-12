@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { check } from "@tauri-apps/plugin-updater";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     Download,
     Music,
@@ -30,8 +30,21 @@
     Wifi,
     Radio,
     Server,
-    Copy
+    Copy,
+    Sparkles
   } from "lucide-svelte";
+
+  interface ReleaseInfo {
+    tag_name: string;
+    name: string;
+    published_at?: string | null;
+    body?: string | null;
+    html_url: string;
+    apk_url?: string | null;
+    appimage_url?: string | null;
+    deb_url?: string | null;
+    exe_url?: string | null;
+  }
 
   interface PlaylistItem {
     url: string;
@@ -113,12 +126,20 @@
   let serverInfo = $state<ServerInfo | null>(null);
   let downloadTarget = $state<"local" | "remote">("local");
   let remotePcIp = $state("");
+  let remoteLocalIp = $state("192.168.1.69");
+  let remoteTailscaleIp = $state("100.121.189.78");
+  let remoteNetworkPreset = $state<"local" | "tailscale" | "custom">("local");
   let remoteConnected = $state<boolean | null>(null);
   let isTestingRemote = $state(false);
   let showRemoteModal = $state(false);
   let showServerInfoModal = $state(false);
   let copiedServerIp = $state(false);
   let isSendingRemote = $state(false);
+
+  const currentAppVersion = "v0.1.0";
+  let showUpdateModal = $state(false);
+  let latestRelease = $state<ReleaseInfo | null>(null);
+  let updateError = $state<string | null>(null);
   interface TrackExistStatus {
     id?: string;
     title: string;
@@ -232,6 +253,20 @@
     }
   }
 
+  function selectNetworkPreset(preset: "local" | "tailscale") {
+    remoteNetworkPreset = preset;
+    if (preset === "local") {
+      remotePcIp = remoteLocalIp;
+    } else {
+      remotePcIp = remoteTailscaleIp;
+    }
+    try {
+      localStorage.setItem("snapstream_network_preset", preset);
+      localStorage.setItem("snapstream_remote_ip", remotePcIp);
+    } catch (_) {}
+    testRemoteConnection(remotePcIp);
+  }
+
   async function copyServerIpToClipboard() {
     if (!serverInfo?.ip) return;
     try {
@@ -317,9 +352,19 @@
       if (savedTarget === "remote" || savedTarget === "local") {
         downloadTarget = savedTarget;
       }
+      const savedLocal = localStorage.getItem("snapstream_local_ip");
+      if (savedLocal) remoteLocalIp = savedLocal;
+      const savedTailscale = localStorage.getItem("snapstream_tailscale_ip");
+      if (savedTailscale) remoteTailscaleIp = savedTailscale;
+      const savedPreset = localStorage.getItem("snapstream_network_preset") as "local" | "tailscale" | "custom" | null;
+      if (savedPreset) {
+        remoteNetworkPreset = savedPreset;
+      }
       const savedIp = localStorage.getItem("snapstream_remote_ip");
       if (savedIp) {
         remotePcIp = savedIp;
+      } else {
+        remotePcIp = remoteNetworkPreset === "tailscale" ? remoteTailscaleIp : remoteLocalIp;
       }
     } catch (_) {}
   }
@@ -610,20 +655,73 @@
     try {
       isCheckingUpdate = true;
       updateStatus = "comprobando...";
-      const update = await check();
-      if (update?.available) {
-        updateStatus = `disponible: v${update.version}`;
-        await update.downloadAndInstall();
-        updateStatus = "instalado: reinicia";
+      updateError = null;
+      let info: ReleaseInfo | null = null;
+      try {
+        info = await invoke<ReleaseInfo>("check_latest_release");
+      } catch (err: any) {
+        try {
+          const res = await fetch("https://api.github.com/repos/EmaBilibili/snapstream/releases/latest", {
+            headers: { "Accept": "application/vnd.github.v3+json" }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const tag = data.tag_name || "";
+            let apk = null;
+            let appimage = null;
+            let deb = null;
+            let exe = null;
+            if (Array.isArray(data.assets)) {
+              for (const a of data.assets) {
+                const n = (a.name || "").toLowerCase();
+                if (n.endsWith(".apk")) apk = a.browser_download_url;
+                else if (n.endsWith(".appimage")) appimage = a.browser_download_url;
+                else if (n.endsWith(".deb")) deb = a.browser_download_url;
+                else if (n.endsWith(".exe") || n.endsWith(".msi")) exe = a.browser_download_url;
+              }
+            }
+            if (!apk && tag) {
+              apk = `https://github.com/EmaBilibili/snapstream/releases/download/${tag}/SnapStream-latest.apk`;
+            }
+            info = {
+              tag_name: tag,
+              name: data.name || tag,
+              published_at: data.published_at,
+              body: data.body,
+              html_url: data.html_url || "https://github.com/EmaBilibili/snapstream/releases",
+              apk_url: apk,
+              appimage_url: appimage,
+              deb_url: deb,
+              exe_url: exe
+            };
+          }
+        } catch (_) {}
+      }
+
+      if (info) {
+        latestRelease = info;
+        showUpdateModal = true;
       } else {
-        updateStatus = "actualizado";
-        setTimeout(() => (updateStatus = null), 3000);
+        updateError = "No se pudo conectar a GitHub Releases";
+        showToast("⚠️ No se pudo comprobar actualizaciones");
       }
     } catch (e: any) {
-      updateStatus = "error_red";
-      setTimeout(() => (updateStatus = null), 3000);
+      updateError = e?.message || String(e);
+      showToast("⚠️ Error comprobando actualizaciones");
     } finally {
       isCheckingUpdate = false;
+      updateStatus = null;
+    }
+  }
+
+  async function openReleaseUrl(url?: string | null) {
+    if (!url) return;
+    try {
+      await openUrl(url);
+    } catch (err) {
+      try {
+        window.open(url, "_blank");
+      } catch (_) {}
     }
   }
 
@@ -728,7 +826,7 @@
           title="Verificar actualizaciones"
         >
           <RefreshCw class={`w-3.5 h-3.5 ${isCheckingUpdate ? 'animate-spin' : ''}`} />
-          <span class="text-[11px]">sync</span>
+          <span class="text-[11px]">actualizar</span>
         </button>
       </div>
     </header>
@@ -778,23 +876,72 @@
       </div>
 
       {#if downloadTarget === "remote"}
-        <div class="flex items-center justify-between px-3 py-2 bg-emerald-950/20 border border-emerald-900/40 rounded-lg text-[11px] text-[#a1a1aa]">
-          <div class="flex items-center gap-2 truncate">
-            <span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse"></span>
-            <span class="truncate">
-              {#if remotePcIp}
-                Destino: <strong class="text-white font-mono">{remotePcIp}:48792</strong> &rarr; <span class="text-emerald-400 font-mono">~/navidrome/music</span>
-              {:else}
-                <span class="text-amber-400 font-medium">⚠️ Falta configurar la IP de tu PC</span>
+        <div class="space-y-2">
+          <!-- Fast Network Switcher (Segmented Control) -->
+          <div class="grid grid-cols-2 gap-1.5 p-1 bg-[#090a0f] border border-[#27272a] rounded-lg">
+            <button
+              onclick={() => selectNetworkPreset("local")}
+              class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium text-xs transition-all cursor-pointer ${
+                remoteNetworkPreset === "local"
+                  ? "bg-[#181f2a] text-emerald-300 font-bold border border-emerald-700/60 shadow-sm"
+                  : "text-[#71717a] hover:text-[#d4d4d8]"
+              }`}
+            >
+              <Wifi class="w-3.5 h-3.5" />
+              <span>Wi-Fi Casa</span>
+              {#if remoteNetworkPreset === "local" && remoteConnected}
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               {/if}
-            </span>
+            </button>
+            <button
+              onclick={() => selectNetworkPreset("tailscale")}
+              class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium text-xs transition-all cursor-pointer ${
+                remoteNetworkPreset === "tailscale"
+                  ? "bg-[#181f2a] text-cyan-300 font-bold border border-cyan-700/60 shadow-sm"
+                  : "text-[#71717a] hover:text-[#d4d4d8]"
+              }`}
+            >
+              <Radio class="w-3.5 h-3.5" />
+              <span>Tailscale</span>
+              {#if remoteNetworkPreset === "tailscale" && remoteConnected}
+                <span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
+              {/if}
+            </button>
           </div>
-          <button
-            onclick={() => showRemoteModal = true}
-            class="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-mono shrink-0 ml-2 cursor-pointer"
-          >
-            {remotePcIp ? "cambiar IP" : "configurar"}
-          </button>
+
+          <div class="flex items-center justify-between px-3 py-2 bg-emerald-950/20 border border-emerald-900/40 rounded-lg text-[11px] text-[#a1a1aa]">
+            <div class="flex items-center gap-2 truncate">
+              <span class={`w-2 h-2 rounded-full shrink-0 ${remoteConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`}></span>
+              <span class="truncate">
+                {#if remotePcIp}
+                  {remoteNetworkPreset === 'local' ? '🏠 Casa:' : remoteNetworkPreset === 'tailscale' ? '🌍 Tailscale:' : 'PC:'} <strong class="text-white font-mono">{remotePcIp}:48792</strong> &rarr; <span class="text-emerald-400 font-mono">~/navidrome/music</span>
+                {:else}
+                  <span class="text-amber-400 font-medium">⚠️ Falta configurar la IP de tu PC</span>
+                {/if}
+              </span>
+            </div>
+            <div class="flex items-center gap-2 shrink-0 ml-2">
+              <button
+                onclick={() => testRemoteConnection()}
+                disabled={isTestingRemote}
+                class="text-[10px] text-emerald-400 hover:text-emerald-300 font-mono flex items-center gap-1 cursor-pointer"
+                title="Comprobar conexión ahora"
+              >
+                {#if isTestingRemote}
+                  <Loader2 class="w-3 h-3 animate-spin" />
+                {:else}
+                  <RefreshCw class="w-3 h-3" />
+                  <span class="hidden sm:inline">probar</span>
+                {/if}
+              </button>
+              <button
+                onclick={() => showRemoteModal = true}
+                class="text-[10px] text-[#a1a1aa] hover:text-white underline font-mono cursor-pointer"
+              >
+                editar
+              </button>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -1566,7 +1713,7 @@
       </div>
     {/if}
 
-    <!-- Modal: Conectar con PC Remota -->
+    <!-- Modal: Conectar con PC Remota (Ajustes de Red y Presets) -->
     {#if showRemoteModal}
       <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
         <div class="bg-[#10121a] border border-[#3f3f46] rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl relative">
@@ -1583,36 +1730,107 @@
             </div>
             <div>
               <h3 class="text-sm font-bold text-white">Enviar a PC Remota (Navidrome)</h3>
-              <p class="text-[11px] text-[#71717a]">Descarga en tu PC sin ocupar espacio en el móvil</p>
+              <p class="text-[11px] text-[#71717a]">Configuración de red local y Tailscale</p>
             </div>
           </div>
 
           <p class="text-xs text-[#a1a1aa] leading-relaxed">
-            Ingresa la IP de tu computadora (deben estar en la misma red Wi-Fi). Las canciones se guardarán automáticamente en <code class="text-white">~/navidrome/music</code>.
+            Puedes configurar dos direcciones: tu IP en la red local de casa y tu IP de Tailscale para cuando estés fuera. Las pistas se guardarán en <code class="text-white">~/navidrome/music</code>.
           </p>
 
-          <div class="space-y-1.5">
-            <span class="text-[11px] text-[#71717a] font-medium block">IP de la PC o dominio remoto:</span>
+          <!-- Preset 1: Wi-Fi Casa (Red Local) -->
+          <div class="space-y-1.5 p-3 rounded-lg bg-[#090a0f] border border-[#27272a]">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
+                <Wifi class="w-3.5 h-3.5" />
+                <span>1. Red Local / Wi-Fi Casa</span>
+              </div>
+              {#if remoteNetworkPreset === "local"}
+                <span class="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800 px-1.5 py-0.2 rounded font-mono">activo</span>
+              {/if}
+            </div>
             <div class="flex gap-2">
               <input
                 type="text"
-                placeholder="192.168.1.69, Tailscale IP o https://tudominio.com"
-                bind:value={remotePcIp}
-                onkeydown={(e) => e.key === "Enter" && testRemoteConnection()}
-                class="flex-1 bg-[#090a0f] border border-[#27272a] focus:border-[#71717a] rounded-lg px-3 py-2 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none"
+                placeholder="192.168.1.69"
+                bind:value={remoteLocalIp}
+                onkeydown={(e) => e.key === "Enter" && testRemoteConnection(remoteLocalIp)}
+                class="flex-1 bg-[#18181b] border border-[#27272a] focus:border-[#71717a] rounded-lg px-3 py-1.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none"
               />
               <button
-                onclick={() => testRemoteConnection()}
-                disabled={isTestingRemote || !remotePcIp.trim()}
-                class="px-3.5 py-2 bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-white text-xs font-mono font-medium rounded-lg transition-colors cursor-pointer disabled:opacity-40 flex items-center gap-1.5 shrink-0"
+                onclick={() => testRemoteConnection(remoteLocalIp)}
+                disabled={isTestingRemote || !remoteLocalIp.trim()}
+                class="px-3 py-1.5 bg-[#27272a] hover:bg-[#3f3f46] border border-[#3f3f46] text-white text-xs font-mono rounded-lg transition-colors cursor-pointer disabled:opacity-40 flex items-center gap-1 shrink-0"
               >
-                {#if isTestingRemote}
-                  <Loader2 class="w-3.5 h-3.5 animate-spin" />
-                  <span>probando...</span>
+                {#if isTestingRemote && remotePcIp === remoteLocalIp}
+                  <Loader2 class="w-3 h-3 animate-spin" />
                 {:else}
-                  <Wifi class="w-3.5 h-3.5" />
+                  <Wifi class="w-3 h-3" />
                   <span>probar</span>
                 {/if}
+              </button>
+            </div>
+          </div>
+
+          <!-- Preset 2: Fuera con Tailscale -->
+          <div class="space-y-1.5 p-3 rounded-lg bg-[#090a0f] border border-[#27272a]">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-cyan-400">
+                <Radio class="w-3.5 h-3.5" />
+                <span>2. Fuera de Casa (Tailscale VPN)</span>
+              </div>
+              {#if remoteNetworkPreset === "tailscale"}
+                <span class="text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 px-1.5 py-0.2 rounded font-mono">activo</span>
+              {/if}
+            </div>
+            <div class="flex gap-2">
+              <input
+                type="text"
+                placeholder="100.121.189.78"
+                bind:value={remoteTailscaleIp}
+                onkeydown={(e) => e.key === "Enter" && testRemoteConnection(remoteTailscaleIp)}
+                class="flex-1 bg-[#18181b] border border-[#27272a] focus:border-[#71717a] rounded-lg px-3 py-1.5 text-xs text-white placeholder-[#52525b] font-mono focus:outline-none"
+              />
+              <button
+                onclick={() => testRemoteConnection(remoteTailscaleIp)}
+                disabled={isTestingRemote || !remoteTailscaleIp.trim()}
+                class="px-3 py-1.5 bg-[#27272a] hover:bg-[#3f3f46] border border-[#3f3f46] text-white text-xs font-mono rounded-lg transition-colors cursor-pointer disabled:opacity-40 flex items-center gap-1 shrink-0"
+              >
+                {#if isTestingRemote && remotePcIp === remoteTailscaleIp}
+                  <Loader2 class="w-3 h-3 animate-spin" />
+                {:else}
+                  <Radio class="w-3 h-3" />
+                  <span>probar</span>
+                {/if}
+              </button>
+            </div>
+          </div>
+
+          <!-- Selector de Modo Activo por Defecto -->
+          <div class="space-y-1">
+            <span class="text-[11px] text-[#71717a] font-medium block">Modo activo actual:</span>
+            <div class="grid grid-cols-2 gap-2 p-1 bg-[#090a0f] border border-[#27272a] rounded-lg">
+              <button
+                onclick={() => { remoteNetworkPreset = "local"; remotePcIp = remoteLocalIp; }}
+                class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium text-xs transition-all cursor-pointer ${
+                  remoteNetworkPreset === "local"
+                    ? "bg-[#181f2a] text-emerald-300 font-bold border border-emerald-700/60 shadow-sm"
+                    : "text-[#71717a] hover:text-[#d4d4d8]"
+                }`}
+              >
+                <Wifi class="w-3.5 h-3.5" />
+                <span>Usar Wi-Fi Casa</span>
+              </button>
+              <button
+                onclick={() => { remoteNetworkPreset = "tailscale"; remotePcIp = remoteTailscaleIp; }}
+                class={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium text-xs transition-all cursor-pointer ${
+                  remoteNetworkPreset === "tailscale"
+                    ? "bg-[#181f2a] text-cyan-300 font-bold border border-cyan-700/60 shadow-sm"
+                    : "text-[#71717a] hover:text-[#d4d4d8]"
+                }`}
+              >
+                <Radio class="w-3.5 h-3.5" />
+                <span>Usar Tailscale</span>
               </button>
             </div>
           </div>
@@ -1621,12 +1839,12 @@
           {#if remoteConnected === true}
             <div class="p-3 bg-emerald-950/40 border border-emerald-800 rounded-lg text-emerald-300 text-xs flex items-center gap-2">
               <Check class="w-4 h-4 shrink-0 text-emerald-400 stroke-[3]" />
-              <span>¡Conexión establecida con la PC con éxito!</span>
+              <span>¡Conexión establecida con la PC ({remotePcIp}) con éxito!</span>
             </div>
           {:else if remoteConnected === false}
             <div class="p-3 bg-red-950/40 border border-red-800 rounded-lg text-red-300 text-xs flex items-center gap-2">
               <AlertTriangle class="w-4 h-4 shrink-0 text-red-400" />
-              <span>No se pudo conectar a la PC. Verifica que SnapStream esté abierto en tu computadora y la IP sea correcta.</span>
+              <span>No se pudo conectar a la PC ({remotePcIp}). Verifica que SnapStream esté abierto en tu computadora y el puerto 48792 esté accesible.</span>
             </div>
           {/if}
 
@@ -1635,21 +1853,129 @@
               onclick={() => showRemoteModal = false}
               class="px-3.5 py-2 text-xs text-[#a1a1aa] hover:text-white transition-colors cursor-pointer"
             >
-              Cancelar
+              Cerrar
             </button>
             <button
               onclick={() => {
-                if (remotePcIp.trim()) {
+                const targetIp = remoteNetworkPreset === "tailscale" ? remoteTailscaleIp.trim() : remoteLocalIp.trim();
+                if (targetIp) {
+                  remotePcIp = targetIp;
                   setDownloadTarget("remote");
-                  localStorage.setItem("snapstream_remote_ip", remotePcIp.trim());
-                  showToast(`Destino configurado a PC: ${remotePcIp.trim()}`);
+                  localStorage.setItem("snapstream_local_ip", remoteLocalIp.trim());
+                  localStorage.setItem("snapstream_tailscale_ip", remoteTailscaleIp.trim());
+                  localStorage.setItem("snapstream_network_preset", remoteNetworkPreset);
+                  localStorage.setItem("snapstream_remote_ip", targetIp);
+                  showToast(`Guardado: modo ${remoteNetworkPreset === 'local' ? 'Wi-Fi Casa' : 'Tailscale'} (${targetIp})`);
+                  testRemoteConnection(targetIp);
                 }
                 showRemoteModal = false;
               }}
-              disabled={!remotePcIp.trim()}
-              class="px-4 py-2 bg-white hover:bg-[#e4e4e7] disabled:opacity-40 text-black font-bold text-xs rounded-lg transition-colors cursor-pointer"
+              class="px-4 py-2 bg-white hover:bg-[#e4e4e7] text-black font-bold text-xs rounded-lg transition-colors cursor-pointer"
             >
               Guardar y Activar
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Modal: Actualizaciones de SnapStream -->
+    {#if showUpdateModal && latestRelease}
+      <div class="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+        <div class="bg-[#10121a] border border-[#3f3f46] rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl relative">
+          <button
+            onclick={() => showUpdateModal = false}
+            class="absolute top-4 right-4 text-[#71717a] hover:text-white cursor-pointer"
+          >
+            <X class="w-4 h-4" />
+          </button>
+
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-lg bg-emerald-950/50 border border-emerald-800 flex items-center justify-center text-emerald-400">
+              <Sparkles class="w-5 h-5" />
+            </div>
+            <div>
+              <h3 class="text-sm font-bold text-white">Actualizaciones de SnapStream</h3>
+              <p class="text-[11px] text-[#71717a]">
+                Versión instalada: <strong class="text-white font-mono">{currentAppVersion}</strong>
+              </p>
+            </div>
+          </div>
+
+          <div class="p-3 bg-[#090a0f] border border-[#27272a] rounded-lg space-y-2 text-xs">
+            <div class="flex items-center justify-between">
+              <span class="text-[#71717a]">Última versión en GitHub:</span>
+              <span class="text-emerald-400 font-mono font-bold bg-[#18181b] px-2 py-0.5 rounded border border-emerald-900/50">
+                {latestRelease.tag_name}
+              </span>
+            </div>
+            {#if latestRelease.published_at}
+              <div class="flex items-center justify-between text-[11px]">
+                <span class="text-[#71717a]">Publicado el:</span>
+                <span class="text-[#a1a1aa] font-mono">{new Date(latestRelease.published_at).toLocaleDateString()}</span>
+              </div>
+            {/if}
+          </div>
+
+          {#if latestRelease.tag_name !== currentAppVersion}
+            <div class="p-3 bg-emerald-950/40 border border-emerald-800 rounded-lg text-emerald-300 text-xs flex items-center gap-2">
+              <Check class="w-4 h-4 shrink-0 text-emerald-400 stroke-[3]" />
+              <span>¡Nueva versión disponible! Puedes descargar el APK actualizado con un toque.</span>
+            </div>
+          {:else}
+            <div class="p-2.5 bg-[#18181b] border border-[#27272a] rounded-lg text-[#a1a1aa] text-xs flex items-center gap-2">
+              <Check class="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>Tu aplicación SnapStream está en la última versión.</span>
+            </div>
+          {/if}
+
+          {#if latestRelease.body}
+            <div class="space-y-1">
+              <span class="text-[11px] text-[#71717a] font-medium block">Notas de la versión:</span>
+              <div class="p-2.5 bg-[#090a0f] border border-[#27272a] rounded-lg text-[11px] text-[#a1a1aa] max-h-32 overflow-y-auto font-mono whitespace-pre-wrap leading-relaxed">
+                {latestRelease.body}
+              </div>
+            </div>
+          {/if}
+
+          <!-- Botones de acción directa -->
+          <div class="space-y-2 pt-1">
+            {#if latestRelease.apk_url}
+              <button
+                onclick={() => openReleaseUrl(latestRelease?.apk_url)}
+                class="w-full py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-black font-bold text-xs rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/30"
+              >
+                <Download class="w-4 h-4 stroke-[2.5]" />
+                <span>Descargar e Instalar APK ({latestRelease.tag_name})</span>
+              </button>
+            {/if}
+
+            <div class="grid grid-cols-2 gap-2">
+              {#if latestRelease.appimage_url}
+                <button
+                  onclick={() => openReleaseUrl(latestRelease?.appimage_url)}
+                  class="py-2 px-3 bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-white text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Download class="w-3.5 h-3.5" />
+                  <span>Linux AppImage</span>
+                </button>
+              {/if}
+              <button
+                onclick={() => openReleaseUrl(latestRelease?.html_url)}
+                class={`py-2 px-3 bg-[#18181b] hover:bg-[#27272a] border border-[#3f3f46] text-white text-xs font-medium rounded-lg transition-colors cursor-pointer flex items-center justify-center gap-1.5 ${!latestRelease.appimage_url ? 'col-span-2' : ''}`}
+              >
+                <ExternalLink class="w-3.5 h-3.5" />
+                <span>Ver en GitHub</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="flex justify-end pt-2 border-t border-[#27272a]">
+            <button
+              onclick={() => showUpdateModal = false}
+              class="px-4 py-2 bg-[#18181b] hover:bg-[#27272a] text-[#a1a1aa] hover:text-white text-xs rounded-lg transition-colors cursor-pointer"
+            >
+              Cerrar
             </button>
           </div>
         </div>

@@ -5,6 +5,34 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
+
+#[cfg(target_os = "linux")]
+fn is_appindicator_available() -> bool {
+    let libs = [
+        "libayatana-appindicator3.so.1",
+        "libappindicator3.so.1",
+        "libayatana-appindicator3.so",
+        "libappindicator3.so",
+    ];
+    for name in libs {
+        if unsafe { libloading::Library::new(name) }.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(not(target_os = "linux"), not(any(target_os = "android", target_os = "ios"))))]
+fn is_appindicator_available() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteDownloadPayload {
     pub url: String,
@@ -1171,6 +1199,90 @@ async fn check_remote_tracks_exist(
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub tag_name: String,
+    pub name: String,
+    pub published_at: Option<String>,
+    pub body: Option<String>,
+    pub html_url: String,
+    pub apk_url: Option<String>,
+    pub appimage_url: Option<String>,
+    pub deb_url: Option<String>,
+    pub exe_url: Option<String>,
+}
+
+#[tauri::command]
+async fn check_latest_release() -> Result<ReleaseInfo, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("snapstream-app")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = client
+        .get("https://api.github.com/repos/EmaBilibili/snapstream/releases/latest")
+        .send()
+        .await
+        .map_err(|e| format!("Error conectando con GitHub Releases: {}", e))?;
+
+    if !res.status().is_success() {
+        return Err(format!("GitHub API respondió con código {}", res.status()));
+    }
+
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Error parseando respuesta de GitHub: {}", e))?;
+
+    let tag_name = json.get("tag_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let name = json.get("name").and_then(|v| v.as_str()).unwrap_or(&tag_name).to_string();
+    let published_at = json.get("published_at").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let body = json.get("body").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let html_url = json.get("html_url").and_then(|v| v.as_str()).unwrap_or("https://github.com/EmaBilibili/snapstream/releases").to_string();
+
+    let mut apk_url = None;
+    let mut appimage_url = None;
+    let mut deb_url = None;
+    let mut exe_url = None;
+
+    if let Some(assets) = json.get("assets").and_then(|a| a.as_array()) {
+        for asset in assets {
+            if let (Some(asset_name), Some(download_url)) = (
+                asset.get("name").and_then(|n| n.as_str()),
+                asset.get("browser_download_url").and_then(|u| u.as_str()),
+            ) {
+                let lower = asset_name.to_lowercase();
+                if lower.ends_with(".apk") {
+                    apk_url = Some(download_url.to_string());
+                } else if lower.ends_with(".appimage") {
+                    appimage_url = Some(download_url.to_string());
+                } else if lower.ends_with(".deb") {
+                    deb_url = Some(download_url.to_string());
+                } else if lower.ends_with(".exe") || lower.ends_with(".msi") {
+                    exe_url = Some(download_url.to_string());
+                }
+            }
+        }
+    }
+
+    if apk_url.is_none() && !tag_name.is_empty() {
+        apk_url = Some(format!("https://github.com/EmaBilibili/snapstream/releases/download/{}/SnapStream-latest.apk", tag_name));
+    }
+
+    Ok(ReleaseInfo {
+        tag_name,
+        name,
+        published_at,
+        body,
+        html_url,
+        apk_url,
+        appimage_url,
+        deb_url,
+        exe_url,
+    })
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_embedded_server(app: AppHandle, port: u16) {
     std::thread::spawn(move || {
@@ -1372,6 +1484,30 @@ fn start_embedded_server(app: AppHandle, port: u16) {
                 continue;
             }
 
+            if (url == "/api/release/latest" || url.starts_with("/api/release/latest?")) && method == tiny_http::Method::Get {
+                let res = tauri::async_runtime::block_on(check_latest_release());
+                match res {
+                    Ok(info) => {
+                        let body = serde_json::to_string(&info).unwrap_or_default();
+                        let response = tiny_http::Response::from_string(body)
+                            .with_status_code(200)
+                            .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                            .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                        let _ = request.respond(response);
+                        continue;
+                    }
+                    Err(e) => {
+                        let body = serde_json::json!({ "error": e }).to_string();
+                        let response = tiny_http::Response::from_string(body)
+                            .with_status_code(500)
+                            .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap())
+                            .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
+                        let _ = request.respond(response);
+                        continue;
+                    }
+                }
+            }
+
             let response = tiny_http::Response::from_string(r#"{"error": "Ruta no encontrada"}"#)
                 .with_status_code(404)
                 .with_header(tiny_http::Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap());
@@ -1396,7 +1532,88 @@ pub fn run() {
             .setup(|app| {
                 let handle = app.handle().clone();
                 start_embedded_server(handle, 48792);
+
+                // Configurar bandeja del sistema (System Tray) para correr en segundo plano si está soportado
+                let has_tray = is_appindicator_available();
+                if has_tray {
+                    let show_i = MenuItem::with_id(app, "show", "Abrir SnapStream", true, None::<&str>)?;
+                    let hide_i = MenuItem::with_id(app, "hide", "Ocultar a la bandeja", true, None::<&str>)?;
+                    let quit_i = MenuItem::with_id(app, "quit", "Salir por completo", true, None::<&str>)?;
+                    let menu = Menu::with_items(app, &[&show_i, &hide_i, &quit_i])?;
+
+                    let mut tray_builder = TrayIconBuilder::new()
+                        .menu(&menu)
+                        .show_menu_on_left_click(false)
+                        .tooltip("SnapStream - Servidor Activo (:48792)")
+                        .on_menu_event(|app, event| match event.id.as_ref() {
+                            "show" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                            "hide" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.hide();
+                                }
+                            }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
+                        })
+                        .on_tray_icon_event(|tray, event| {
+                            if let TrayIconEvent::Click {
+                                button: MouseButton::Left,
+                                button_state: MouseButtonState::Up,
+                                ..
+                            } = event
+                            {
+                                let app = tray.app_handle();
+                                if let Some(window) = app.get_webview_window("main") {
+                                    if window.is_visible().unwrap_or(false) {
+                                        let _ = window.hide();
+                                    } else {
+                                        let _ = window.show();
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                    }
+                                }
+                            }
+                        });
+
+                    if let Some(icon) = app.default_window_icon() {
+                        tray_builder = tray_builder.icon(icon.clone());
+                    }
+
+                    let _ = tray_builder.build(app)?;
+                } else {
+                    eprintln!("[SnapStream] Nota: libayatana-appindicator no encontrada en el sistema. Para activar icono en bandeja: sudo pacman -S libayatana-appindicator");
+                }
+
+                if std::env::args().any(|arg| arg == "--minimized" || arg == "--background" || arg == "--tray") {
+                    if let Some(window) = app.get_webview_window("main") {
+                        if has_tray {
+                            let _ = window.hide();
+                        } else {
+                            let _ = window.minimize();
+                        }
+                    }
+                }
+
                 Ok(())
+            })
+            .on_window_event(|window, event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    // Al presionar 'X', ocultar en bandeja o minimizar para no matar el servidor
+                    api.prevent_close();
+                    if is_appindicator_available() {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.minimize();
+                    }
+                }
             });
     }
 
@@ -1412,7 +1629,8 @@ pub fn run() {
             get_remote_media_info,
             search_remote_music,
             check_tracks_exist,
-            check_remote_tracks_exist
+            check_remote_tracks_exist,
+            check_latest_release
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1447,6 +1665,13 @@ mod tests {
         assert!(results[0].exists, "Billy Idol should exist in ~/navidrome/music");
         assert!(results[1].exists, "XXXTENTACION Moonlight should exist in ~/navidrome/music");
         assert!(!results[2].exists, "Nonexistent track should not exist");
+    }
+
+    #[tokio::test]
+    async fn test_check_latest_release() {
+        let release = check_latest_release().await.unwrap();
+        assert!(!release.tag_name.is_empty(), "Release tag_name should not be empty");
+        assert!(release.apk_url.is_some(), "Release should have an apk_url");
     }
 }
 
